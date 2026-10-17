@@ -82,6 +82,9 @@ final class XSubBehavior: SubBehavior {
     }
 
     /// No local filtering: the application sees everything the publishers send.
+    /// XSUB never waits (a subscription message is applied, the rest goes to every pipe or is dropped).
+    override func sendCapacity() -> Int { SocketCore.fixedSendCapacity }
+
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? {
         InboundMessage(frames: frames)
     }

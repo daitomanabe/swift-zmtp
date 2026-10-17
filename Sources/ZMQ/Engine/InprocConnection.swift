@@ -206,6 +206,8 @@ final class InprocConnection: PipeConnection, @unchecked Sendable {
             return
         }
         for frames in messages { core.messageReceived(frames, on: pipe) }
+        // Move them on to the application's receive queue first: that is what makes room for the next batch.
+        core.receiveBatchEnded()
         if canTakeMore {
             toPeer { $0.acknowledged(1) }
         } else {

@@ -89,6 +89,15 @@ final class Pipe {
         return core.conflates || pending < core.sendLimit
     }
 
+    /// How many more messages `enqueue` may take within the send high-water mark; 0 when `canAccept` is
+    /// false. Where the mark does not limit (no mark, or a conflating socket) it is a fixed number.
+    var sendRoom: Int {
+        guard canAccept else { return 0 }
+        if core.conflates || core.sendLimit == .max { return SocketCore.fixedSendCapacity }
+        // Capped so that adding up the rooms of many pipes cannot overflow.
+        return min(core.sendLimit - pending, 1 << 30)
+    }
+
     /// True while the received-message queue may take more (a conflating socket keeps one message only
     /// and always has room).
     var hasInboundRoom: Bool { core.conflates || inbound.count < core.receiveLimit }

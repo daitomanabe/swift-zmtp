@@ -37,6 +37,8 @@ final class PushBehavior: SocketBehavior {
         return .accepted
     }
 
+    override func sendCapacity() -> Int { core.loadBalancedCapacity() }
+
     /// PUSH never expects data from its peer.
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? { nil }
 }

@@ -61,4 +61,8 @@ final class PairBehavior: SocketBehavior {
         peerPipe.enqueue(frames)
         return .accepted
     }
+
+    override func sendCapacity() -> Int { peerPipe?.sendRoom ?? 0 }
+
+    override var usesReceiveQueue: Bool { true }
 }

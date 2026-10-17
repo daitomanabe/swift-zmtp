@@ -59,7 +59,26 @@ class SocketBehavior {
         throw ZMQError.invalidState("\(socketType.rawValue) sockets cannot send")
     }
 
+    /// How many more messages `trySend` would accept right now without returning `.wouldBlock`. The
+    /// engine turns this into send credits: `send` may queue that many messages (less those already
+    /// queued) and return without waiting, and the loop routes them with `trySend` afterwards. Called
+    /// on the loop whenever the answer may have changed, so it must be cheap.
+    ///
+    /// The default is 0: every `send` takes the slow path and waits for the loop (REQ, and ROUTER with
+    /// `routerMandatory`, whose sends depend on state that a credit cannot promise). A type that never
+    /// waits (PUB, ROUTER) answers `SocketCore.fixedSendCapacity`; one that waits for room (PUSH,
+    /// DEALER, PAIR) adds up the room of the pipes it would pick (`SocketCore.loadBalancedCapacity()`).
+    /// A message that is no longer accepted when the loop gets to it (its pipe went away meanwhile)
+    /// waits in the engine and is retried before any waiting sender, so the order is kept.
+    func sendCapacity() -> Int { 0 }
+
     // MARK: Receiving
+
+    /// True when `receive()` may take messages from the engine's shared receive queue, which the loop
+    /// fills ahead of the application. That is only right for a type whose `received` / `delivered` /
+    /// `beforeReceive` do not depend on the moment the application takes a message (REQ and REP do:
+    /// they say no). Never used with `conflate`, where a pipe keeps only its newest message.
+    var usesReceiveQueue: Bool { false }
 
     /// Called when a `receive()` starts, before it looks for a message. Throw to fail it.
     func beforeReceive() throws {}

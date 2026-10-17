@@ -71,6 +71,8 @@ class SubBehavior: SocketBehavior {
 
     /// The PUB side filters too; this drops what slipped through (a subscription not yet cancelled
     /// there, or a peer that does not filter).
+    override var usesReceiveQueue: Bool { true }
+
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? {
         guard let topic = frames.first, subscriptions.matches(topic) else { return nil }
         return InboundMessage(frames: frames)

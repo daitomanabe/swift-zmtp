@@ -47,4 +47,8 @@ final class DealerBehavior: SocketBehavior {
         pipe.enqueue(frames)
         return .accepted
     }
+
+    override func sendCapacity() -> Int { core.loadBalancedCapacity() }
+
+    override var usesReceiveQueue: Bool { true }
 }

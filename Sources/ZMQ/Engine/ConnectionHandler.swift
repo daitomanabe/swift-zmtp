@@ -159,6 +159,8 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
     func channelReadComplete(context: ChannelHandlerContext) {
         context.flush()
         readInFlight = false
+        // The messages of this read go on to the application's receive queue, which frees room in the pipe.
+        core.receiveBatchEnded()
         resumeReadIfNeeded()
         context.fireChannelReadComplete()
     }

@@ -105,6 +105,9 @@ final class XPubBehavior: PubBehavior {
     }
 
     /// Data from an XSUB peer, handed on as it is.
+    /// The subscription notices (`queueInbound`) go through the receive queue too.
+    override var usesReceiveQueue: Bool { true }
+
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? {
         InboundMessage(frames: [Kind.message.tag] + frames)
     }

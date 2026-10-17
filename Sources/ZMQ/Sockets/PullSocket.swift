@@ -34,4 +34,6 @@ public final class PullSocket: ZMQSocket {
 
 final class PullBehavior: SocketBehavior {
     init() { super.init(socketType: .pull) }
+
+    override var usesReceiveQueue: Bool { true }
 }

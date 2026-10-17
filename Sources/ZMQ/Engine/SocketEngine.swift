@@ -30,8 +30,25 @@ final class SocketEngine: Sendable {
 
     /// Sends one message (at least one frame). Waits while the type cannot take it, for example
     /// when every pipe is at its high-water mark.
+    ///
+    /// Fast path: with a send credit and nobody waiting ahead, the message goes into the shared send
+    /// queue and the call returns without suspending (see the top of `SocketCore.swift`). Otherwise the
+    /// call hops onto the loop and waits there, as before; while it does, it is counted as a slow-path
+    /// sender, which keeps later sends from overtaking it.
     func send(_ frames: [ByteBuffer]) async throws {
         let core = core
+        // A cancelled task sends nothing, as on the slow path.
+        try Task.checkCancellation()
+        switch core.shared.fastSend(frames) {
+        case .queued(let wake):
+            if let target = wake { core.loop.execute { core.fastSendsQueued(upTo: target) } }
+            return
+        case .closed:
+            throw ZMQError.socketClosed
+        case .slow:
+            break
+        }
+        defer { core.shared.slowSendFinished() }
         let waiter = Waiter<Void>(payload: frames)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -60,8 +77,20 @@ final class SocketEngine: Sendable {
     }
 
     /// Waits for the next message.
+    ///
+    /// Fast path: a message already in the shared receive queue is returned without suspending; the
+    /// loop is asked to refill the queue when it has fallen to half. An empty queue (or a type that does
+    /// not use it) takes the slow path: hop onto the loop and wait there.
     func receive() async throws -> [ByteBuffer] {
         let core = core
+        if core.receivesViaQueue {
+            // A cancelled task receives nothing, as on the slow path.
+            try Task.checkCancellation()
+            if case .message(let frames, let refill) = core.shared.fastReceive() {
+                if refill { core.loop.execute { core.fillReceiveQueue() } }
+                return frames
+            }
+        }
         let waiter = Waiter<[ByteBuffer]>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[ByteBuffer], any Error>) in

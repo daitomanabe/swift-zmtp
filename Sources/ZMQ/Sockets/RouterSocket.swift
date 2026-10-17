@@ -105,6 +105,12 @@ final class RouterBehavior: SocketBehavior {
         return .accepted
     }
 
+    /// Without `routerMandatory` a send never waits (an unknown ID or a full pipe drops the message), so
+    /// credits are fine. With it, the answer depends on the pipe the message is for: slow path only.
+    override func sendCapacity() -> Int { core.options.routerMandatory ? 0 : SocketCore.fixedSendCapacity }
+
+    override var usesReceiveQueue: Bool { true }
+
     /// The routing ID of the source pipe goes in front of the frames.
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? {
         guard let id = idsByPipe[pipe.id] else { return nil }

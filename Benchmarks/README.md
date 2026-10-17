@@ -20,3 +20,6 @@ clang -O2 libzmq_bench.c $(pkg-config --cflags --libs libzmq) -o .build/libzmq_b
 ```
 
 Run them one at a time with nothing else heavy running. A Swift run that gives no result within 120 s stops with an error.
+
+If a release build fails with "cannot find type …" after files were added to the root package, remove `Benchmarks/.build`
+and build again: SwiftPM did not pick up new files of the path dependency in an existing build directory here.

@@ -89,16 +89,18 @@ against recorded libzmq traffic, including ZMTP 3.0 peers. `inproc://` connects 
 
 ## Performance
 
-One run each on an Apple M5 Max, in one process over loopback TCP (rough numbers; see `Benchmarks/`):
+One run each on an Apple M5 Max, in one process over loopback TCP, Swift and libzmq back to back under the same
+load (the machine was busy, load average about 17, so the numbers are rough; see `Benchmarks/`):
 
 | Test | swift-zmtp | libzmq 4.3.5 |
 |---|---|---|
-| Throughput, 16 B × 200,000 | 86,557 msg/s | 6,711,338 msg/s |
-| Throughput, 1 KB × 20,000 | 84,358 msg/s (86 MB/s) | 863,154 msg/s (884 MB/s) |
-| REQ/REP round trip, 16 B | p50 41 µs, p99 99 µs | p50 58 µs, p99 141 µs |
+| Throughput, 16 B × 200,000 | 1,920,871 msg/s | 3,996,892 msg/s |
+| Throughput, 1 KB × 20,000 | 1,227,695 msg/s (1,257 MB/s) | 462,168 msg/s (473 MB/s) |
+| REQ/REP round trip, 16 B | p50 148 µs, p99 514 µs | p50 168 µs, p99 396 µs |
 
-Round trips are faster than libzmq. Throughput for small messages is far lower, because every `send` and `receive`
-currently hops onto the socket's event loop; a fast path is planned ([PLAN.md](PLAN.md), stage 4).
+`send` and `receive` normally do not hop onto the socket's event loop: they put messages into, or take them from, a
+queue the event loop drains and fills in batches. Before this fast path, small-message throughput was about 1/78 of
+libzmq's (86,557 msg/s on a quiet machine).
 
 ## Layout
 

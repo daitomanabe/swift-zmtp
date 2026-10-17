@@ -88,5 +88,8 @@ class PubBehavior: SocketBehavior {
     }
 
     /// PUB never expects data from its peers.
+    /// PUB never waits, so any number of queued messages is fine; the loop routes or drops them.
+    override func sendCapacity() -> Int { SocketCore.fixedSendCapacity }
+
     override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? { nil }
 }
