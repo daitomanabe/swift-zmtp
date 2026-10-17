@@ -36,6 +36,13 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
     private var readInFlight = false
     /// `handshakeFailed` has been reported for this connection.
     private var handshakeFailureReported = false
+    /// Set while the handler is in a pipeline; the answer of an authentication comes back through it.
+    private var handlerContext: ChannelHandlerContext?
+    /// Counts the authentications asked for, so an answer can be matched to its question.
+    private var authenticationSerial: UInt64 = 0
+    /// The authentication whose answer the connection is waiting for.
+    private var pendingAuthentication: UInt64?
+    private var authenticationTask: Task<Void, Never>?
 
     // Clocks. All run on the socket's loop and are cancelled when the connection ends.
     private var handshakeTimer: Scheduled<Void>?
@@ -53,7 +60,8 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
             configuration: .init(
                 socketType: core.behavior.socketType,
                 routingID: core.options.routingID?.frame.bytes ?? [],
-                maxMessageSize: core.options.maxMessageSize
+                maxMessageSize: core.options.maxMessageSize,
+                mechanism: core.options.security.mechanism
             ))
     }
 
@@ -125,11 +133,14 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
 
     func handlerAdded(context: ChannelHandlerContext) {
         channel = context.channel
+        handlerContext = context
         core.handlerAdded(self)
     }
 
     func handlerRemoved(context: ChannelHandlerContext) {
         cancelTimers()
+        abandonAuthentication()
+        handlerContext = nil
         core.handlerRemoved(self)
     }
 
@@ -167,6 +178,7 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
 
     func channelInactive(context: ChannelHandlerContext) {
         cancelTimers()
+        abandonAuthentication()
         if isEstablished && !isReady {
             reportHandshakeFailure("the connection closed before the handshake finished")
         }
@@ -199,6 +211,8 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
                     return
                 }
                 if minorVersion >= 1 { startHeartbeat() }
+            case .authenticate(let request):
+                startAuthentication(request)
             case .message(let frames):
                 if let pipe { core.messageReceived(frames, on: pipe) }
             case .subscribe(let topic):
@@ -209,7 +223,7 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
                 // The PONG follows as a .write. A TTL promises the next PING (or any traffic) in time.
                 if ttl > 0 { startTTLTimer(tenthsOfSecond: ttl) }
             case .closed(let error):
-                if !isReady { reportHandshakeFailure(String(describing: error)) }
+                if !isReady { reportHandshakeFailure(Self.reason(for: error)) }
                 // Any ERROR command was emitted as a .write just before.
                 context.flush()
                 context.close(promise: nil)
@@ -217,6 +231,69 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
             }
         }
         if wrote { context.flush() }
+    }
+
+    /// The text of `handshakeFailed` for a ZMTP error.
+    private static func reason(for error: ZMTPError) -> String {
+        switch error {
+        case .mechanismMismatch(let local, let peer):
+            "security mechanism mismatch: this socket uses \(local), the peer uses \(peer)"
+        case .authenticationFailed:
+            "authentication failed"
+        case .peerError(let reason):
+            "the peer sent ERROR \(reason)"
+        default:
+            String(describing: error)
+        }
+    }
+
+    // MARK: Authentication
+
+    /// A server-side mechanism wants the caller's `authenticate` function to decide about the peer. The
+    /// function runs in a Task; its answer is fed back on the socket's loop, if the connection is still
+    /// the same one and still open by then. The handshake timer keeps running meanwhile.
+    private func startAuthentication(_ request: AuthenticationRequest) {
+        switch request {
+        case .plain(let username, let password):
+            guard let authenticate = core.options.security.plainAuthenticator else {
+                // The mechanism comes from the same options, so this does not happen.
+                close()
+                return
+            }
+            let credentials = PlainCredentials(username: username, password: password)
+            beginAuthentication { await authenticate(credentials) }
+        }
+    }
+
+    private func beginAuthentication(_ decide: @escaping @Sendable () async -> Bool) {
+        authenticationSerial &+= 1
+        let serial = authenticationSerial
+        pendingAuthentication = serial
+        let loop = core.loop
+        let handler = NIOLoopBound(self, eventLoop: loop)
+        authenticationTask = Task {
+            let allowed = await decide()
+            loop.execute { handler.value.authenticationAnswered(serial: serial, allowed: allowed) }
+        }
+    }
+
+    private func authenticationAnswered(serial: UInt64, allowed: Bool) {
+        // A different serial or none: the connection ended (or ended and began again) while the caller thought.
+        guard pendingAuthentication == serial else { return }
+        pendingAuthentication = nil
+        authenticationTask = nil
+        guard let context = handlerContext, context.channel.isActive else { return }
+        apply(connection.completeAuthentication(allowed: allowed), context: context)
+        // Messages the peer sent meanwhile are delivered by now; like after a read, hand them on.
+        core.receiveBatchEnded()
+        resumeReadIfNeeded()
+    }
+
+    /// The connection is over: forget the question, so a late answer is dropped, and cancel the Task.
+    private func abandonAuthentication() {
+        pendingAuthentication = nil
+        authenticationTask?.cancel()
+        authenticationTask = nil
     }
 
     // MARK: Clocks

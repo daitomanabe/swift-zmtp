@@ -30,6 +30,12 @@ public struct SocketOptions: Sendable {
     /// A connecting socket then tries again. nil: no limit.
     public var handshakeTimeout: Duration? = .seconds(30)
 
+    /// How connections are authenticated (libzmq: `ZMQ_PLAIN_SERVER`, `ZMQ_PLAIN_USERNAME` and
+    /// `ZMQ_PLAIN_PASSWORD`). `.none` (the default) is the NULL mechanism. Applies to `tcp://` and
+    /// `ipc://` connections made and accepted by this socket; `inproc://` ignores it. Both ends must agree;
+    /// a mismatch or a refused login makes the handshake fail (`SocketEvent.handshakeFailed`).
+    public var security: Security = .none
+
     /// ROUTER only (libzmq: `ZMQ_ROUTER_MANDATORY`). Makes `send(_:to:)` report what it would otherwise
     /// hide: a routing ID that no connected peer has throws `ZMQError.hostUnreachable`, and a peer that
     /// is at its send high-water mark makes the call wait (it ends with `CancellationError` when the

@@ -95,7 +95,7 @@ private final class PeerHandler: ChannelInboundHandler {
                 pings.add(ttl)
             case .closed:
                 context.close(promise: nil)
-            case .message, .subscribe, .cancel:
+            case .message, .subscribe, .cancel, .authenticate:
                 break
             }
         }

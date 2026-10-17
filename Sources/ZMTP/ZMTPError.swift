@@ -18,4 +18,10 @@ public enum ZMTPError: Error, Sendable, Equatable {
     case unexpected(String)
     /// The peer sent an ERROR command.
     case peerError(reason: String)
+    /// We refused the peer's credentials (a PLAIN server whose caller answered `allowed: false`). The peer
+    /// got an ERROR command with reason "400".
+    case authenticationFailed
+    /// The mechanism configuration cannot be used, for example a PLAIN user name over 255 bytes. Reported
+    /// by `start()`, before anything is sent.
+    case invalidConfiguration(String)
 }

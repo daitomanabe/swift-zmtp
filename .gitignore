@@ -7,3 +7,4 @@ xcuserdata/
 DerivedData/
 .venv/
 __pycache__/
+/.claude/worktrees/

@@ -10,11 +10,17 @@ public struct ZMTPConnection: Sendable {
         public var routingID: [UInt8]
         /// Largest accepted frame body, per frame (like libzmq's MAXMSGSIZE). nil: no limit.
         public var maxMessageSize: Int?
+        /// The security mechanism and its settings. NULL by default.
+        public var mechanism: MechanismConfiguration
 
-        public init(socketType: SocketType, routingID: [UInt8] = [], maxMessageSize: Int? = nil) {
+        public init(
+            socketType: SocketType, routingID: [UInt8] = [], maxMessageSize: Int? = nil,
+            mechanism: MechanismConfiguration = .null
+        ) {
             self.socketType = socketType
             self.routingID = routingID
             self.maxMessageSize = maxMessageSize
+            self.mechanism = mechanism
         }
     }
 
@@ -24,6 +30,10 @@ public struct ZMTPConnection: Sendable {
         case write(ByteBuffer)
         /// The handshake is done; messages may flow.
         case ready(peer: Metadata, minorVersion: UInt8)
+        /// A server-side mechanism wants the caller to check the peer (for PLAIN: the user name and
+        /// password). The connection reads nothing more until `completeAuthentication(allowed:)` is
+        /// called with the answer; bytes that arrive meanwhile are kept.
+        case authenticate(AuthenticationRequest)
         /// One complete multipart message (the data frames, bodies are slices of the received bytes).
         case message([ByteBuffer])
         /// The peer subscribed (we are PUB or XPUB). `topic` is a prefix match.
@@ -38,12 +48,16 @@ public struct ZMTPConnection: Sendable {
     }
 
     private enum Phase: Sendable {
-        case idle, greeting, handshake, ready, closed
+        /// `.authenticating`: the mechanism asked the caller to check the peer and waits for the answer.
+        case idle, greeting, handshake, authenticating, ready, closed
     }
+
+    /// A peer must not send before our WELCOME; this much may wait in `inbound` while the caller authenticates.
+    private static let maxBytesWhileAuthenticating = 16 * 1024
 
     private let configuration: Configuration
     private var phase = Phase.idle
-    private var mechanism = Mechanism.null
+    private var mechanism: Mechanism
     /// Received bytes that do not make a whole greeting or frame yet.
     private var inbound = ByteBuffer()
     /// Frames of the message being assembled.
@@ -53,14 +67,22 @@ public struct ZMTPConnection: Sendable {
 
     public init(configuration: Configuration) {
         self.configuration = configuration
+        self.mechanism = Mechanism(configuration.mechanism)
     }
 
     /// True between the end of the handshake and the first `.closed`.
     public var isReady: Bool { phase == .ready }
 
-    /// Call once when the transport is up. Returns our greeting (64 bytes in one write).
+    /// Call once when the transport is up. Returns our greeting (64 bytes in one write), or
+    /// `.closed(.invalidConfiguration)` when the mechanism settings cannot be used.
     public mutating func start() -> [Output] {
         guard phase == .idle else { return [] }
+        do throws(ZMTPError) {
+            try mechanism.validate()
+        } catch {
+            phase = .closed
+            return [.closed(error)]
+        }
         phase = .greeting
         let greeting = Greeting.encode(routingIDLength: configuration.routingID.count, mechanism: mechanism.name)
         return [.write(greeting)]
@@ -75,7 +97,7 @@ public struct ZMTPConnection: Sendable {
         case .idle:
             fail(.unexpected("receive() before start()"), into: &outputs)
             return outputs
-        case .greeting, .handshake, .ready:
+        case .greeting, .handshake, .authenticating, .ready:
             break
         }
 
@@ -89,6 +111,9 @@ public struct ZMTPConnection: Sendable {
 
         do throws(ZMTPError) {
             try process(into: &outputs)
+            if phase == .authenticating, inbound.readableBytes > Self.maxBytesWhileAuthenticating {
+                throw .unexpected("too much data from the peer while waiting for authentication")
+            }
         } catch {
             fail(error, into: &outputs)
         }
@@ -96,9 +121,28 @@ public struct ZMTPConnection: Sendable {
         return outputs
     }
 
-    /// Appends the wire form of one message (all frames, MORE set on all but the last).
+    /// Gives the answer to an `.authenticate` output. Allowed: the handshake goes on (PLAIN: WELCOME is
+    /// written, and anything the peer sent meanwhile is processed). Not allowed: the peer gets an ERROR
+    /// command (PLAIN: reason "400") and the result ends with `.closed(.authenticationFailed)`.
+    /// Returns nothing when no authentication is pending, so a late answer after a close is harmless.
+    public mutating func completeAuthentication(allowed: Bool) -> [Output] {
+        guard phase == .authenticating else { return [] }
+        var outputs: [Output] = []
+        phase = .handshake
+        do throws(ZMTPError) {
+            try apply(try mechanism.completeAuthentication(allowed: allowed), into: &outputs)
+            try process(into: &outputs)
+        } catch {
+            fail(error, into: &outputs)
+        }
+        if inbound.readableBytes == 0 { inbound = ByteBuffer() }
+        return outputs
+    }
+
+    /// Appends the wire form of one message (all frames, MORE set on all but the last). Mutating because a
+    /// mechanism may count what it sends. The same goes for the other `encode...` methods.
     /// Precondition: `isReady`, and `frames` is not empty.
-    public func encodeMessage(_ frames: [ByteBuffer], into buffer: inout ByteBuffer) {
+    public mutating func encodeMessage(_ frames: [ByteBuffer], into buffer: inout ByteBuffer) {
         precondition(isReady, "encodeMessage before the handshake finished")
         precondition(!frames.isEmpty, "a message has at least one frame")
         let last = frames.count - 1
@@ -109,13 +153,13 @@ public struct ZMTPConnection: Sendable {
 
     /// Appends a subscription for `topic`: a SUBSCRIBE command for a 3.1 peer, a data frame starting
     /// with 0x01 for a 3.0 peer. Precondition: `isReady`.
-    public func encodeSubscribe(_ topic: ByteBuffer, into buffer: inout ByteBuffer) {
+    public mutating func encodeSubscribe(_ topic: ByteBuffer, into buffer: inout ByteBuffer) {
         encodeSubscription(topic, subscribe: true, into: &buffer)
     }
 
     /// Appends the cancel of a subscription (CANCEL command, or a data frame starting with 0x00).
     /// Precondition: `isReady`.
-    public func encodeCancel(_ topic: ByteBuffer, into buffer: inout ByteBuffer) {
+    public mutating func encodeCancel(_ topic: ByteBuffer, into buffer: inout ByteBuffer) {
         encodeSubscription(topic, subscribe: false, into: &buffer)
     }
 
@@ -123,7 +167,7 @@ public struct ZMTPConnection: Sendable {
     /// hears nothing for that long (0: no TTL). `context` is echoed by the PONG and is at most 16 bytes.
     /// The connection sends no timers of its own; the caller decides when to ping.
     /// Precondition: `isReady`.
-    public func encodePing(ttl: UInt16, context: ByteBuffer, into buffer: inout ByteBuffer) {
+    public mutating func encodePing(ttl: UInt16, context: ByteBuffer, into buffer: inout ByteBuffer) {
         precondition(isReady, "PING before the handshake finished")
         precondition(context.readableBytes <= 16, "a PING context is at most 16 bytes")
         mechanism.encode(
@@ -132,7 +176,7 @@ public struct ZMTPConnection: Sendable {
 
     // MARK: - Writing
 
-    private func encodeSubscription(_ topic: ByteBuffer, subscribe: Bool, into buffer: inout ByteBuffer) {
+    private mutating func encodeSubscription(_ topic: ByteBuffer, subscribe: Bool, into buffer: inout ByteBuffer) {
         precondition(isReady, "subscriptions before the handshake finished")
         if (peerMinorVersion ?? 0) >= 1 {
             let command: Command = subscribe ? .subscribe(topic: topic) : .cancel(topic: topic)
@@ -166,7 +210,7 @@ public struct ZMTPConnection: Sendable {
     private mutating func process(into outputs: inout [Output]) throws(ZMTPError) {
         while true {
             switch phase {
-            case .idle, .closed:
+            case .idle, .closed, .authenticating:
                 return
 
             case .greeting:
@@ -178,7 +222,8 @@ public struct ZMTPConnection: Sendable {
                 peerMinorVersion = peer.minorVersion
                 phase = .handshake
                 let local = localProperties()
-                outputs.append(Self.write(commands: mechanism.begin(local: local)))
+                let commands = mechanism.begin(local: local)
+                if !commands.isEmpty { outputs.append(Self.write(commands: commands)) }
 
             case .handshake:
                 guard let frame = try FrameCodec.decode(&inbound, maxFrameSize: configuration.maxMessageSize)
@@ -186,12 +231,7 @@ public struct ZMTPConnection: Sendable {
                 guard frame.flags.contains(.command) else {
                     throw .unexpected("data frame before the handshake finished")
                 }
-                switch try mechanism.receive(handshake: try Command(body: frame.body)) {
-                case .send(let commands):
-                    outputs.append(Self.write(commands: commands))
-                case .complete(let peer):
-                    try completeHandshake(peer: peer, into: &outputs)
-                }
+                try apply(try mechanism.receive(handshake: frame.body), into: &outputs)
 
             case .ready:
                 guard let wire = try FrameCodec.decode(&inbound, maxFrameSize: configuration.maxMessageSize)
@@ -218,12 +258,33 @@ public struct ZMTPConnection: Sendable {
         return Metadata(properties: properties)
     }
 
-    private mutating func completeHandshake(peer: Metadata, into outputs: inout [Output]) throws(ZMTPError) {
+    /// Carries out what the mechanism asked for.
+    private mutating func apply(_ step: Mechanism.HandshakeStep, into outputs: inout [Output]) throws(ZMTPError) {
+        switch step {
+        case .send(let commands):
+            if !commands.isEmpty { outputs.append(Self.write(commands: commands)) }
+        case .authenticate(let request):
+            phase = .authenticating
+            outputs.append(.authenticate(request))
+        case .complete(let peer, let commands):
+            try completeHandshake(peer: peer, send: commands, into: &outputs)
+        case .reject(let commands, let error):
+            outputs.append(Self.write(commands: commands))
+            throw error
+        }
+    }
+
+    /// Checks the peer's socket type; if it fits, writes `commands` (the mechanism's last handshake
+    /// command, for example PLAIN's READY) and reports `.ready`.
+    private mutating func completeHandshake(
+        peer: Metadata, send commands: [Command], into outputs: inout [Output]
+    ) throws(ZMTPError) {
         guard let peerType = peer.socketType else { throw .missingSocketType }
         guard let type = SocketType(rawValue: peerType), configuration.socketType.isCompatible(with: type) else {
             outputs.append(Self.write(commands: [.error(reason: "Invalid socket type")]))
             throw .incompatibleSocketType(local: configuration.socketType, peer: peerType)
         }
+        if !commands.isEmpty { outputs.append(Self.write(commands: commands)) }
         phase = .ready
         outputs.append(.ready(peer: peer, minorVersion: peerMinorVersion ?? 0))
     }

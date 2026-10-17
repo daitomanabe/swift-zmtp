@@ -329,6 +329,12 @@ final class SocketCore: @unchecked Sendable {
             return loop.makeFailedFuture(error)
         }
         if case .inproc(let name) = target { return bindInproc(name, endpoint: endpoint) }
+        // Inproc ignores `security`, so only the stream transports check it.
+        do {
+            try options.security.validate()
+        } catch {
+            return loop.makeFailedFuture(error)
+        }
 
         let core = self
         let listener = Listener()
@@ -402,6 +408,11 @@ final class SocketCore: @unchecked Sendable {
         loop.preconditionInEventLoop()
         guard phase == .open else { throw ZMQError.socketClosed }
         let target = try Endpoint.forConnect(endpoint)
+        // Inproc ignores `security`, so only the stream transports check it.
+        switch target {
+        case .inproc: break
+        case .tcp, .ipc: try options.security.validate()
+        }
         let pipe = Pipe(core: self, id: makePipeID(), origin: .connect(target, endpoint: endpoint))
         try behavior.pipeCreated(pipe)
         pipes.append(pipe)

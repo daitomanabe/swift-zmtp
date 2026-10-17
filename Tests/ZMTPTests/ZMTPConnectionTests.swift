@@ -4,7 +4,7 @@ import ZMTP
 
 // MARK: - Helpers
 
-private typealias Output = ZMTPConnection.Output
+typealias Output = ZMTPConnection.Output
 
 private func connection(
     _ type: SocketType, routingID: [UInt8] = [], maxMessageSize: Int? = nil
@@ -16,7 +16,7 @@ private func connection(
 }
 
 /// Feeds a stream to the connection, whole or in chunks of `chunkSize` bytes.
-private func feed(_ connection: inout ZMTPConnection, _ stream: [UInt8], chunkSize: Int? = nil) -> [Output] {
+func feed(_ connection: inout ZMTPConnection, _ stream: [UInt8], chunkSize: Int? = nil) -> [Output] {
     var outputs: [Output] = []
     let size = chunkSize ?? max(stream.count, 1)
     var offset = 0
@@ -28,16 +28,17 @@ private func feed(_ connection: inout ZMTPConnection, _ stream: [UInt8], chunkSi
     return outputs
 }
 
-private func text(_ buffer: ByteBuffer) -> String {
+func text(_ buffer: ByteBuffer) -> String {
     String(decoding: buffer.readableBytesView, as: UTF8.self)
 }
 
 /// Everything except `.write`, as short strings: "ready:PULL", "message:a|b", "subscribe:w", "closed:...".
-private func events(_ outputs: [Output]) -> [String] {
+func events(_ outputs: [Output]) -> [String] {
     outputs.compactMap { output in
         switch output {
         case .write: nil
         case .ready(let peer, _): "ready:\(peer.socketType ?? "?")"
+        case .authenticate(.plain(let username, let password)): "authenticate:\(username):\(password)"
         case .message(let frames): "message:" + frames.map(text).joined(separator: "|")
         case .subscribe(let topic): "subscribe:\(text(topic))"
         case .cancel(let topic): "cancel:\(text(topic))"
@@ -47,20 +48,20 @@ private func events(_ outputs: [Output]) -> [String] {
     }
 }
 
-private func written(_ outputs: [Output]) -> [UInt8] {
+func written(_ outputs: [Output]) -> [UInt8] {
     outputs.flatMap { output -> [UInt8] in
         if case .write(let buffer) = output { return Array(buffer.readableBytesView) }
         return []
     }
 }
 
-private func encoded(_ body: (inout ByteBuffer) -> Void) -> [UInt8] {
+func encoded(_ body: (inout ByteBuffer) -> Void) -> [UInt8] {
     var buffer = ByteBuffer()
     body(&buffer)
     return Array(buffer.readableBytesView)
 }
 
-private func buffer(_ string: String) -> ByteBuffer { ByteBuffer(string: string) }
+func buffer(_ string: String) -> ByteBuffer { ByteBuffer(string: string) }
 
 struct HandshakeCase: Sendable, CustomTestStringConvertible {
     var fixture: String
