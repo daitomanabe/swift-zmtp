@@ -7,6 +7,8 @@ struct PeerEvent: Sendable, CustomStringConvertible {
     /// The `frames` of the event, decoded from hex. Empty for events without frames.
     let frames: [[UInt8]]
     let endpoints: [String]
+    /// The `pid` of the event (the `ready` line carries the Python process id).
+    let pid: Int32?
     /// The raw line, for failure messages.
     let line: String
 
@@ -58,6 +60,8 @@ final class PeerProcess: @unchecked Sendable {
     private var storedStderr = Data()
     private var stdoutClosed = false
     private var exitStatus: Int32?
+    private var suspended = false
+    private var watchdog: Process?
 
     /// Starts the peer. The peer stops itself after `--timeout` seconds, so even a leaked process
     /// does not live long; `terminate()` ends it at once.
@@ -127,6 +131,7 @@ final class PeerProcess: @unchecked Sendable {
             name: name,
             frames: (object["frames"] as? [String] ?? []).map(decodeHex),
             endpoints: object["endpoints"] as? [String] ?? [],
+            pid: (object["pid"] as? Int).map { Int32($0) },
             line: line)
     }
 
@@ -189,12 +194,64 @@ final class PeerProcess: @unchecked Sendable {
         }
     }
 
-    /// Stops the peer if it still runs. `uv` passes SIGTERM on to Python; SIGKILL follows if it lingers.
+    // MARK: Stopping and continuing
+
+    /// The id of the Python process, from the `ready` event. `uv run` may run Python as a child, so
+    /// `process.processIdentifier` is not always the process that has to be stopped.
+    var pythonPID: Int32? { events.first { $0.name == "ready" }?.pid }
+
+    /// Stops the Python process with SIGSTOP, as a frozen or unreachable peer. A watchdog process
+    /// continues and ends it if this test process dies before `resume()` or `terminate()` (a stopped
+    /// process would otherwise stay behind forever; its own `--timeout` cannot fire while it is stopped).
+    func suspend() throws {
+        guard let pid = pythonPID else { throw PeerError("peer printed no pid\n\(log)") }
+        let guardProcess = Process()
+        guardProcess.executableURL = URL(fileURLWithPath: "/bin/sh")
+        guardProcess.arguments = [
+            "-c",
+            // SIGTERM (from `resume()` / `terminate()`) ends the watchdog together with its sleep.
+            "trap 'kill $s 2>/dev/null; exit 0' TERM; sleep 25 & s=$!; wait $s; "
+                + "if ps -p \"$1\" -o command= | grep -q '[p]eer.py'; then kill -CONT \"$1\"; kill -TERM \"$1\"; fi",
+            "sh", String(pid),
+        ]
+        guardProcess.standardInput = FileHandle.nullDevice
+        guardProcess.standardOutput = FileHandle.nullDevice
+        guardProcess.standardError = FileHandle.nullDevice
+        try guardProcess.run()
+        lock.withLock {
+            watchdog = guardProcess
+            suspended = true
+        }
+        guard kill(pid, SIGSTOP) == 0 else {
+            resume()
+            throw PeerError("SIGSTOP to \(pid) failed (errno \(errno))")
+        }
+    }
+
+    /// Continues a peer stopped by `suspend()`. Harmless when it is not stopped.
+    func resume() {
+        let (pid, wasSuspended, guardProcess) = lock.withLock {
+            let state = (storedEvents.first { $0.name == "ready" }?.pid, suspended, watchdog)
+            suspended = false
+            watchdog = nil
+            return state
+        }
+        if wasSuspended, let pid { kill(pid, SIGCONT) }
+        guardProcess?.terminate()
+    }
+
+    /// Stops the peer if it still runs; a stopped peer is continued first so that the signal is acted on.
+    /// `uv` passes SIGTERM on to Python; SIGKILL follows if it lingers.
     func terminate() {
+        resume()
         guard process.isRunning else { return }
         process.terminate()
+        let python = pythonPID
         DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [self] in
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                if let python { kill(python, SIGKILL) }
+            }
         }
     }
 }

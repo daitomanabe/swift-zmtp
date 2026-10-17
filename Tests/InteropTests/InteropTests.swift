@@ -11,12 +11,37 @@ enum Role: String, CaseIterable, Sendable, CustomTestStringConvertible {
     var testDescription: String { rawValue }
 }
 
-private let interopEnabled = ProcessInfo.processInfo.environment["ZMQ_INTEROP"] == "1"
+/// Which kind of endpoint the side that listens uses.
+enum Transport: String, CaseIterable, Sendable, CustomTestStringConvertible {
+    case tcp
+    case ipc
 
-private struct Timeout: Error {}
+    var testDescription: String { rawValue }
+
+    /// The endpoint Swift binds: a free port on the loopback interface, or a fresh socket file.
+    var swiftBindEndpoint: String { self == .tcp ? "tcp://127.0.0.1:*" : "ipc://*" }
+
+    /// The endpoint the peer binds. IPC: a fresh path in the temporary directory (short enough for a
+    /// socket address); the caller removes the file afterwards.
+    func peerBindEndpoint() -> String {
+        switch self {
+        case .tcp: return "tcp://127.0.0.1:*"
+        case .ipc: return "ipc://" + Self.freshIPCPath()
+        }
+    }
+
+    static func freshIPCPath() -> String {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("zmq-interop-\(UUID().uuidString.prefix(8)).ipc").path
+    }
+}
+
+let interopEnabled = ProcessInfo.processInfo.environment["ZMQ_INTEROP"] == "1"
+
+struct Timeout: Error {}
 
 /// Runs `operation`; fails with `Timeout` if it takes longer than `seconds`. The losing task is cancelled.
-private func within<T: Sendable>(
+func within<T: Sendable>(
     _ seconds: Int = 15, _ operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
@@ -31,7 +56,7 @@ private func within<T: Sendable>(
     }
 }
 
-private func interopOptions(routingID: String? = nil) -> SocketOptions {
+func interopOptions(routingID: String? = nil) -> SocketOptions {
     var options = SocketOptions()
     options.reconnectInterval = .milliseconds(20)
     options.linger = .milliseconds(500)
@@ -40,26 +65,31 @@ private func interopOptions(routingID: String? = nil) -> SocketOptions {
 }
 
 /// The frames of `message` as bytes, the form the peer's events are decoded into.
-private func bytes(_ message: Message) -> [[UInt8]] { message.frames.map(\.bytes) }
+func bytes(_ message: Message) -> [[UInt8]] { message.frames.map(\.bytes) }
 
-private func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
+func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
 
 /// Brings one Swift socket and one libzmq peer together, runs `body`, waits for the peer to finish
 /// (status 0, `done`), and closes the socket. Returns the finished peer so the caller can check
 /// what it received. On any failure the peer is terminated and the socket closed.
-private func interop<S: ZMQSocket>(
-    _ socket: S, peer peerType: String, _ role: Role, peerArguments: [String] = [],
-    _ body: (PeerProcess) async throws -> Void
+/// `transport` picks the endpoints of the side that binds (an IPC file the peer bound is removed at the end).
+func interop<S: ZMQSocket>(
+    _ socket: S, peer peerType: String, _ role: Role, transport: Transport = .tcp,
+    peerArguments: [String] = [], _ body: (PeerProcess) async throws -> Void
 ) async throws -> PeerProcess {
     var peer: PeerProcess?
+    var peerIPCFile: String?
+    defer { if let peerIPCFile { try? FileManager.default.removeItem(atPath: peerIPCFile) } }
     do {
         switch role {
         case .swiftBinds:
-            let endpoint = try await within { try await socket.bind("tcp://127.0.0.1:*") }
+            let endpoint = try await within { try await socket.bind(transport.swiftBindEndpoint) }
             peer = try PeerProcess(arguments: ["--type", peerType, "--connect", endpoint] + peerArguments)
             try await peer?.waitForEvent("ready", timeout: .seconds(60))
         case .peerBinds:
-            peer = try PeerProcess(arguments: ["--type", peerType, "--bind", "tcp://127.0.0.1:*"] + peerArguments)
+            let bindEndpoint = transport.peerBindEndpoint()
+            if transport == .ipc { peerIPCFile = String(bindEndpoint.dropFirst("ipc://".count)) }
+            peer = try PeerProcess(arguments: ["--type", peerType, "--bind", bindEndpoint] + peerArguments)
             let ready = try await peer?.waitForEvent("ready", timeout: .seconds(60))
             guard let endpoint = ready?.first?.endpoints.first else { throw PeerError("peer printed no endpoint") }
             try await within { try await socket.connect(endpoint) }
