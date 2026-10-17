@@ -39,6 +39,7 @@ func events(_ outputs: [Output]) -> [String] {
         case .write: nil
         case .ready(let peer, _): "ready:\(peer.socketType ?? "?")"
         case .authenticate(.plain(let username, let password)): "authenticate:\(username):\(password)"
+        case .authenticate(.curve(let publicKey)): "authenticate:curve:\(publicKey.count)"
         case .message(let frames): "message:" + frames.map(text).joined(separator: "|")
         case .subscribe(let topic): "subscribe:\(text(topic))"
         case .cancel(let topic): "cancel:\(text(topic))"

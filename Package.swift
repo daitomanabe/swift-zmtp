@@ -21,6 +21,7 @@ let package = Package(
         .target(
             name: "ZMTP",
             dependencies: [
+                "ZMTPCrypto",
                 .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),

@@ -1,12 +1,18 @@
 import NIOCore
 
-/// The security mechanism of one connection. NULL and PLAIN exist; CURVE (stage 3) becomes more cases.
-/// Everything the connection sends or receives after the greeting goes through here, so a mechanism can
-/// run its own handshake and wrap or unwrap frames (CURVE encrypts every frame).
+/// The security mechanism of one connection. Everything the connection sends or receives after the
+/// greeting goes through here, so a mechanism can run its own handshake and wrap or unwrap frames (CURVE
+/// encrypts every frame).
 enum Mechanism: Sendable {
     case null
     case plainClient(PlainClient)
     case plainServer(PlainServer)
+    case curveClient(CurveClient)
+    case curveServer(CurveServer)
+    /// A CURVE connection after its handshake: the client or server state turns into this when the
+    /// handshake completes, so the ephemeral secrets of the handshake are gone and `encode` / `decode`
+    /// touch only the key and the nonce counters.
+    case curve(CurveSession)
 
     /// What the handshake wants next.
     enum HandshakeStep {
@@ -30,6 +36,11 @@ enum Mechanism: Sendable {
             self = .plainClient(PlainClient(username: Array(username.utf8), password: Array(password.utf8)))
         case .plainServer:
             self = .plainServer(PlainServer())
+        case .curveClient(let serverPublicKey, let publicKey, let secretKey):
+            self = .curveClient(
+                CurveClient(serverPublicKey: serverPublicKey, publicKey: publicKey, secretKey: secretKey))
+        case .curveServer(let publicKey, let secretKey):
+            self = .curveServer(CurveServer(publicKey: publicKey, secretKey: secretKey))
         }
     }
 
@@ -38,14 +49,17 @@ enum Mechanism: Sendable {
         switch self {
         case .null: "NULL"
         case .plainClient, .plainServer: "PLAIN"
+        case .curveClient, .curveServer, .curve: "CURVE"
         }
     }
 
     /// Checks the configuration before anything is sent.
     func validate() throws(ZMTPError) {
         switch self {
-        case .null, .plainServer: break
+        case .null, .plainServer, .curve: break
         case .plainClient(let client): try client.validate()
+        case .curveClient(let client): try client.validate()
+        case .curveServer(let server): try server.validate()
         }
     }
 
@@ -62,6 +76,16 @@ enum Mechanism: Sendable {
             let commands = server.begin(local: local)
             self = .plainServer(server)
             return commands
+        case .curveClient(var client):
+            let commands = client.begin(local: local)
+            self = .curveClient(client)
+            return commands
+        case .curveServer(var server):
+            let commands = server.begin(local: local)
+            self = .curveServer(server)
+            return commands
+        case .curve:
+            return []
         }
     }
 
@@ -84,6 +108,16 @@ enum Mechanism: Sendable {
             let step = try server.receive(try Command(body: body))
             self = .plainServer(server)
             return step
+        case .curveClient(var client):
+            let step = try client.receive(handshake: body)
+            if let session = client.takeSession() { self = .curve(session) } else { self = .curveClient(client) }
+            return step
+        case .curveServer(var server):
+            let step = try server.receive(handshake: body)
+            if let session = server.takeSession() { self = .curve(session) } else { self = .curveServer(server) }
+            return step
+        case .curve:
+            throw .unexpected("handshake command after the CURVE handshake")
         }
     }
 
@@ -94,7 +128,11 @@ enum Mechanism: Sendable {
             let step = try server.completeAuthentication(allowed: allowed)
             self = .plainServer(server)
             return step
-        case .null, .plainClient:
+        case .curveServer(var server):
+            let step = try server.completeAuthentication(allowed: allowed)
+            if let session = server.takeSession() { self = .curve(session) } else { self = .curveServer(server) }
+            return step
+        case .null, .plainClient, .curveClient, .curve:
             throw .unexpected("no authentication is pending")
         }
     }
@@ -104,13 +142,24 @@ enum Mechanism: Sendable {
     mutating func encode(_ frame: WireFrame, into buffer: inout ByteBuffer) {
         switch self {
         case .null, .plainClient, .plainServer: FrameCodec.write(frame, into: &buffer)
+        case .curve(var session):
+            session.encode(frame, into: &buffer)
+            self = .curve(session)
+        case .curveClient, .curveServer:
+            preconditionFailure("a frame was encoded before the CURVE handshake finished")
         }
     }
 
     /// Turns a frame received after the handshake into the frame it carries.
     mutating func decode(_ frame: WireFrame) throws(ZMTPError) -> WireFrame {
         switch self {
-        case .null, .plainClient, .plainServer: frame
+        case .null, .plainClient, .plainServer: return frame
+        case .curve(var session):
+            let plain = try session.decode(frame)
+            self = .curve(session)
+            return plain
+        case .curveClient, .curveServer:
+            throw .unexpected("a frame was decoded before the CURVE handshake finished")
         }
     }
 }

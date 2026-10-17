@@ -21,6 +21,10 @@ public enum ZMTPError: Error, Sendable, Equatable {
     /// We refused the peer's credentials (a PLAIN server whose caller answered `allowed: false`). The peer
     /// got an ERROR command with reason "400".
     case authenticationFailed
+    /// A CURVE message failed its cryptographic check: a box did not open, a nonce did not increase, a
+    /// size was wrong, or a key was unusable. The connection closes without an ERROR command (a peer that
+    /// cannot decrypt gets no hint). The text says which check failed.
+    case cryptoError(String)
     /// The mechanism configuration cannot be used, for example a PLAIN user name over 255 bytes. Reported
     /// by `start()`, before anything is sent.
     case invalidConfiguration(String)

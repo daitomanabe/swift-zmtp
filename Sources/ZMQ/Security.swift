@@ -17,7 +17,8 @@ public struct PlainCredentials: Sendable, Hashable {
 /// mechanism, or the handshake fails. `inproc://` connections ignore it.
 ///
 /// PLAIN sends the password in the clear; use it only on a trusted network or under another layer of
-/// protection.
+/// protection. CURVE (25/ZMTP-CURVE) authenticates both sides and encrypts every message; it needs the
+/// server's public key on the client and a key pair on each side.
 public enum Security: Sendable {
     /// No authentication (the NULL mechanism). The default.
     case none
@@ -29,6 +30,15 @@ public enum Security: Sendable {
     /// `SocketEvent.handshakeFailed`). The call may take a while; it counts against `handshakeTimeout`.
     /// A PLAIN server needs this function, like libzmq needs an authenticator for it.
     case plainServer(authenticate: @Sendable (PlainCredentials) async -> Bool)
+    /// CURVE, client side: connect to the server that owns `serverKey`, proving ourselves with `keyPair`.
+    /// If the server has another key the handshake fails (`SocketEvent.handshakeFailed`) and nothing is
+    /// sent. Everything after the handshake is encrypted.
+    case curveClient(serverKey: CurvePublicKey, keyPair: CurveKeyPair)
+    /// CURVE, server side: prove ourselves with `keyPair` and call `authenticate` with the public key of
+    /// each client that has proved it owns that key. `false` refuses the client: it gets ERROR "400" and
+    /// the connection closes. nil (the default) accepts every client key, as libzmq does without an
+    /// authenticator. The call may take a while; it counts against `handshakeTimeout`.
+    case curveServer(keyPair: CurveKeyPair, authenticate: (@Sendable (CurvePublicKey) async -> Bool)? = nil)
 
     /// PLAIN, server side, with a fixed list of accounts (user name to password).
     public static func plainServer(accepting accounts: [String: String]) -> Security {
@@ -46,6 +56,12 @@ extension Security {
         case .none: .null
         case .plainClient(let username, let password): .plainClient(username: username, password: password)
         case .plainServer: .plainServer
+        case .curveClient(let serverKey, let keyPair):
+            .curveClient(
+                serverPublicKey: serverKey.bytes, publicKey: keyPair.publicKey.bytes,
+                secretKey: keyPair.secretKey.bytes)
+        case .curveServer(let keyPair, _):
+            .curveServer(publicKey: keyPair.publicKey.bytes, secretKey: keyPair.secretKey.bytes)
         }
     }
 
@@ -58,6 +74,19 @@ extension Security {
         if password.utf8.count > 255 {
             throw .invalidState("the PLAIN password is longer than 255 bytes")
         }
+    }
+
+    /// True for a CURVE server (with or without an `authenticate` function).
+    var isCurveServer: Bool {
+        if case .curveServer = self { return true }
+        return false
+    }
+
+    /// The function that decides about CURVE clients; nil for a CURVE server without one (it accepts every
+    /// client key) and for every other setting.
+    var curveAuthenticator: (@Sendable (CurvePublicKey) async -> Bool)? {
+        if case .curveServer(_, let authenticate) = self { return authenticate }
+        return nil
     }
 
     /// The function that decides about PLAIN clients (nil unless this is a PLAIN server).

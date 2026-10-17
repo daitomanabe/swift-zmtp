@@ -240,6 +240,8 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
             "security mechanism mismatch: this socket uses \(local), the peer uses \(peer)"
         case .authenticationFailed:
             "authentication failed"
+        case .cryptoError(let detail):
+            "CURVE check failed: \(detail)"
         case .peerError(let reason):
             "the peer sent ERROR \(reason)"
         default:
@@ -262,6 +264,19 @@ final class ConnectionHandler: ChannelInboundHandler, PipeConnection {
             }
             let credentials = PlainCredentials(username: username, password: password)
             beginAuthentication { await authenticate(credentials) }
+        case .curve(let keyBytes):
+            guard core.options.security.isCurveServer else {
+                close()
+                return
+            }
+            let key = CurvePublicKey(validated: keyBytes)
+            // Without an authenticate function every client key is accepted; the question still goes
+            // through the same path, so the handshake continues on the loop as for any answer.
+            let authenticate = core.options.security.curveAuthenticator
+            beginAuthentication {
+                if let authenticate { return await authenticate(key) }
+                return true
+            }
         }
     }
 

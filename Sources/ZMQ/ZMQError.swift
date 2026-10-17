@@ -10,6 +10,9 @@ public enum ZMQError: Error, Sendable, Equatable {
     case socketClosed
     /// The operation does not fit the state of the socket, for example a REP reply without a request.
     case invalidState(String)
+    /// A CURVE key is not usable: a Z85 text or byte array of the wrong size, or text that is not Z85. The
+    /// text says what is wrong; it never contains the key.
+    case invalidKey(String)
     /// A ROUTER socket with `options.routerMandatory` was asked to send to a routing ID that no connected
     /// peer has.
     case hostUnreachable(RoutingID)

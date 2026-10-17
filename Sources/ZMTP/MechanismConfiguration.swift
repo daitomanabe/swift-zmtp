@@ -13,8 +13,17 @@ public enum MechanismConfiguration: Sendable, Equatable {
     /// PLAIN, server side: the connection asks the caller to check the credentials with
     /// `ZMTPConnection.Output.authenticate` and goes on with `completeAuthentication(allowed:)`.
     case plainServer
-    // CURVE (25/ZMTP-CURVE) adds a client and a server case here; the server one also asks the caller
-    // to authenticate, through a new `AuthenticationRequest` case.
+    /// CURVE (25/ZMTP-CURVE, 26/CurveZMQ), client side. All keys are raw 32-byte Curve25519 keys:
+    /// `serverPublicKey` is the server's long-term public key (S), `publicKey` and `secretKey` are the
+    /// client's own long-term pair (C, c). `start()` closes the connection with
+    /// `ZMTPError.invalidConfiguration` when a key has the wrong size, when `publicKey` does not belong
+    /// to `secretKey`, or when `serverPublicKey` cannot be used for a key agreement.
+    case curveClient(serverPublicKey: [UInt8], publicKey: [UInt8], secretKey: [UInt8])
+    /// CURVE, server side: `publicKey` and `secretKey` are the server's long-term pair (S, s). After the
+    /// client proved its identity the connection asks the caller whether to accept that client key
+    /// (`AuthenticationRequest.curve`) and goes on with `completeAuthentication(allowed:)`; a caller
+    /// that accepts every client answers `true`. The same validation as for `curveClient` applies.
+    case curveServer(publicKey: [UInt8], secretKey: [UInt8])
 }
 
 /// What a server-side mechanism wants the caller to check before it goes on. Answer it with
@@ -22,4 +31,7 @@ public enum MechanismConfiguration: Sendable, Equatable {
 public enum AuthenticationRequest: Sendable, Equatable {
     /// The credentials from a PLAIN client's HELLO (decoded as UTF-8, invalid bytes replaced).
     case plain(username: String, password: String)
+    /// The long-term public key (C, 32 bytes) of a CURVE client, proven by its INITIATE. Only the
+    /// holder of the matching secret key can get this far, so the key itself is the client's identity.
+    case curve(publicKey: [UInt8])
 }
