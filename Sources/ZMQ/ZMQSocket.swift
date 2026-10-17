@@ -11,6 +11,12 @@ public protocol ZMQSocket: Sendable {
     /// more than once; later operations throw `ZMQError.socketClosed`. A socket that is released
     /// without `close()` is closed at once, without waiting.
     func close() async
+    /// A new stream of what happens to the socket's connections (`SocketEvent`): listening, connecting,
+    /// handshakes, disconnects. Every call makes an independent stream, so several listeners can watch one
+    /// socket. A stream shows the events from the time of the call on and keeps the newest 256 when its
+    /// reader is slow. The last event is `.closed`; the stream ends after it, also when the socket is
+    /// closed already.
+    func events() -> AsyncStream<SocketEvent>
 }
 
 /// Calls `receive()` until the socket is closed, then ends without an error.

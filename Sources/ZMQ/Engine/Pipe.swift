@@ -8,7 +8,8 @@ import ZMTP
 /// that connection.
 final class Pipe {
     enum Origin {
-        case connect(host: String, port: Int)
+        /// `endpoint` is the string the application passed to `connect`.
+        case connect(Endpoint.ConnectTarget, endpoint: String)
         case bind
     }
 
@@ -18,8 +19,8 @@ final class Pipe {
         case idle
         /// A connect attempt is in flight.
         case connecting
-        /// A TCP connection exists (handshake may still be running).
-        case linked(ConnectionHandler)
+        /// A connection exists (its handshake may still be running).
+        case linked(any PipeConnection)
         /// Waiting to reconnect.
         case backoff(Scheduled<Void>)
         /// The socket is closing; no more attempts.
@@ -61,9 +62,15 @@ final class Pipe {
         return false
     }
 
+    /// The string given to `connect`, for a connect-side pipe.
+    var connectEndpoint: String? {
+        if case .connect(_, let endpoint) = origin { return endpoint }
+        return nil
+    }
+
     /// The connection, if one exists.
-    var handler: ConnectionHandler? {
-        if case .linked(let handler) = link { return handler }
+    var connection: (any PipeConnection)? {
+        if case .linked(let connection) = link { return connection }
         return nil
     }
 
@@ -90,15 +97,12 @@ final class Pipe {
     /// Subscriptions do not count against the high-water mark and are not kept for a later connection;
     /// a SUB socket sends its whole set again from `pipeAttached`.
     func writeSubscription(_ topic: ByteBuffer, subscribe: Bool) {
-        guard let handler, handler.isReady, let channel = handler.channel, channel.isActive else { return }
-        var buffer = channel.allocator.buffer(capacity: topic.readableBytes + 16)
-        handler.encodeSubscription(topic, subscribe: subscribe, into: &buffer)
-        channel.writeAndFlush(buffer, promise: nil)
+        connection?.writeSubscription(topic, subscribe: subscribe)
     }
 
     /// Arranges for `flushNow` to run once at the end of this tick (if a connection is up).
     func scheduleFlush() {
-        guard !flushScheduled, !outbound.isEmpty, let handler, handler.isAttached else { return }
+        guard !flushScheduled, !outbound.isEmpty, let connection, connection.isAttached else { return }
         flushScheduled = true
         core.loop.assumeIsolated().execute { [self] in
             flushScheduled = false
@@ -106,35 +110,34 @@ final class Pipe {
         }
     }
 
+    /// Hands everything queued to the connection: one `write` for the whole queue, cut into pieces of
+    /// about `chunkSize` bytes so that one flush does not build one enormous buffer.
     private func flushNow() {
-        guard let handler, handler.isAttached, let channel = handler.channel, channel.isActive,
-            !outbound.isEmpty
-        else { return }
+        guard let connection, connection.isAttached, !outbound.isEmpty else { return }
 
-        var buffer = channel.allocator.buffer(capacity: 1024)
-        var count = 0
+        var batch: [[ByteBuffer]] = []
+        var batchBytes = 0
         while !outbound.isEmpty {
-            handler.encode(outbound.removeFirst(), into: &buffer)
-            count += 1
-            if buffer.readableBytes >= Self.chunkSize {
-                write(buffer, messages: count, to: channel)
-                buffer = channel.allocator.buffer(capacity: 1024)
-                count = 0
+            let message = outbound.removeFirst()
+            batchBytes += message.reduce(0) { $0 + $1.readableBytes }
+            batch.append(message)
+            if batchBytes >= Self.chunkSize {
+                write(batch, to: connection)
+                batch = []
+                batchBytes = 0
             }
         }
-        if count > 0 { write(buffer, messages: count, to: channel) }
-        channel.flush()
+        if !batch.isEmpty { write(batch, to: connection) }
     }
 
-    private func write(_ buffer: ByteBuffer, messages: Int, to channel: any Channel) {
-        // Counted before the write: the promise can complete inside `flush()`.
-        writing += messages
-        let promise = channel.eventLoop.makePromise(of: Void.self)
-        promise.futureResult.assumeIsolated().whenComplete { [self] _ in
+    private func write(_ messages: [[ByteBuffer]], to connection: any PipeConnection) {
+        let count = messages.count
+        // Counted before the write: the connection may complete it before `write` returns.
+        writing += count
+        connection.write(messages) { [self] in
             // A failed write means the connection broke; those messages are lost, as in libzmq.
-            writing -= messages
+            writing -= count
             core.pipeWriteCompleted(self)
         }
-        channel.write(buffer, promise: promise)
     }
 }

@@ -18,6 +18,8 @@ public final class ReqSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Sends `message` to one peer (taking the peers in turn) and returns its reply. Waits while an
     /// earlier request is still open and while no peer can take the message; concurrent calls are served
     /// one after another. A peer that never replies keeps the call waiting until the task is cancelled.

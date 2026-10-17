@@ -22,6 +22,9 @@
 //     every handshake `pipeAttached` runs (SUB re-sends its subscriptions with `Pipe.writeSubscription`,
 //     ROUTER registers the peer Identity, PAIR refuses a second peer by returning false).
 //   - `peerSubscribed` / `peerCancelled`: SUBSCRIBE and CANCEL received from the peer (PUB).
+// Transports: a pipe talks to its peer through a `PipeConnection` (PipeConnection.swift). TCP and IPC
+// connections are NIO channels driven by `ConnectionHandler`, which also keeps the handshake timeout and
+// heartbeat clocks. The core reports what happens to connections as `SocketEvent`s (`events`).
 // The public class of the type creates a `SocketEngine` with its behavior and exposes the typed
 // `send` / `receive` calls on top of `engine.send(frames)` and `engine.receive()`.
 
@@ -45,15 +48,40 @@ final class SocketCore: @unchecked Sendable {
         case closed
     }
 
+    /// A bound endpoint: the listening channel and, for IPC, the socket file it created.
+    ///
+    /// `@unchecked Sendable`: the NIO child initializer captures it, but it is only touched on the loop.
+    final class Listener: @unchecked Sendable {
+        /// The endpoint actually bound (set when the bind has succeeded).
+        var endpoint = ""
+        var channel: (any Channel)?
+        private var file: (path: String, identity: Endpoint.FileIdentity?)?
+
+        /// Remembers the socket file just created at `path`, to remove it when the listener closes.
+        func ownFile(at path: String) {
+            file = (path, Endpoint.socketFileIdentity(at: path))
+        }
+
+        /// Stops listening and removes the socket file we created (not one another socket put there since).
+        func close() {
+            channel?.close(promise: nil)
+            guard let file else { return }
+            self.file = nil
+            Endpoint.removeSocketFile(at: file.path, ifIdentity: file.identity)
+        }
+    }
+
     let loop: any EventLoop
     let options: SocketOptions
     let behavior: SocketBehavior
+    /// Where `SocketEvent`s go; `events()` of the public sockets makes streams from it.
+    let events = SocketEventHub()
 
     private(set) var phase = Phase.open
     /// Pipes in creation order; the order is used for round-robin.
     private(set) var pipes: [Pipe] = []
     private var nextPipeID = 0
-    private var listeners: [any Channel] = []
+    private var listeners: [Listener] = []
     private var handlers: [ObjectIdentifier: ConnectionHandler] = [:]
     private var receiveWaiters = CircularBuffer<Waiter<[ByteBuffer]>>()
     private var sendWaiters = CircularBuffer<Waiter<Void>>()
@@ -156,41 +184,65 @@ final class SocketCore: @unchecked Sendable {
     func bind(_ endpoint: String) -> EventLoopFuture<String> {
         loop.preconditionInEventLoop()
         guard phase == .open else { return loop.makeFailedFuture(ZMQError.socketClosed) }
-        let address: Endpoint.TCP
+        let target: Endpoint.BindTarget
         do {
-            address = try Endpoint.tcpForBind(endpoint)
+            target = try Endpoint.forBind(endpoint)
         } catch {
             return loop.makeFailedFuture(error)
         }
 
         let core = self
-        return ServerBootstrap(group: loop)
+        let listener = Listener()
+        let bootstrap = ServerBootstrap(group: loop)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
-            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .childChannelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
             .childChannelOption(ChannelOptions.autoRead, value: false)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
-                        ConnectionHandler(core: core, connectPipeID: nil))
+                        ConnectionHandler(core: core, source: .accept(listener)))
                 }
             }
-            .bind(host: address.host, port: address.port)
+        let binding: EventLoopFuture<any Channel>
+        switch target {
+        case .tcp(let address):
+            binding = bootstrap
+                .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+                .childChannelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
+                .bind(host: address.host, port: address.port)
+        case .ipc(let path):
+            // A file left by an earlier run would make bind fail with "address in use".
+            Endpoint.removeStaleFile(at: path)
+            binding = bootstrap.bind(unixDomainSocketPath: path, cleanupExistingSocketFile: false)
+        }
+
+        return binding
             .assumeIsolated()
             .flatMapThrowing { channel in
+                listener.channel = channel
+                if case .ipc(let path) = target { listener.ownFile(at: path) }
                 guard self.phase == .open else {
-                    channel.close(promise: nil)
+                    listener.close()
                     throw ZMQError.socketClosed
                 }
-                self.listeners.append(channel)
-                guard let local = channel.localAddress, let host = local.ipAddress, let port = local.port else {
-                    throw ZMQError.bindFailed(endpoint: endpoint, reason: "no local address")
+                switch target {
+                case .tcp:
+                    guard let local = channel.localAddress, let host = local.ipAddress, let port = local.port else {
+                        listener.close()
+                        throw ZMQError.bindFailed(endpoint: endpoint, reason: "no local address")
+                    }
+                    listener.endpoint = "tcp://\(host):\(port)"
+                case .ipc(let path):
+                    listener.endpoint = "ipc://\(path)"
                 }
-                return "tcp://\(host):\(port)"
+                self.listeners.append(listener)
+                self.events.emit(.listening(endpoint: listener.endpoint))
+                return listener.endpoint
             }
             .flatMapErrorThrowing { error in
                 if error is ZMQError { throw error }
-                throw ZMQError.bindFailed(endpoint: endpoint, reason: String(describing: error))
+                let reason = String(describing: error)
+                self.events.emit(.bindFailed(endpoint: endpoint, reason: reason))
+                throw ZMQError.bindFailed(endpoint: endpoint, reason: reason)
             }
             .nonisolated()
     }
@@ -199,8 +251,8 @@ final class SocketCore: @unchecked Sendable {
     func connect(_ endpoint: String) throws {
         loop.preconditionInEventLoop()
         guard phase == .open else { throw ZMQError.socketClosed }
-        let address = try Endpoint.tcpForConnect(endpoint)
-        let pipe = Pipe(core: self, id: makePipeID(), origin: .connect(host: address.host, port: address.port))
+        let target = try Endpoint.forConnect(endpoint)
+        let pipe = Pipe(core: self, id: makePipeID(), origin: .connect(target, endpoint: endpoint))
         try behavior.pipeCreated(pipe)
         pipes.append(pipe)
         connectNow(pipe)
@@ -222,7 +274,7 @@ final class SocketCore: @unchecked Sendable {
             closeContinuations.append(continuation)
             phase = .lingering
             failWaiters()
-            for listener in listeners { listener.close(promise: nil) }
+            for listener in listeners { listener.close() }
             if lingerAborted || options.linger.map({ $0 <= .zero }) == true {
                 beginTeardown()
             } else if !hasPendingOutput {
@@ -264,11 +316,16 @@ final class SocketCore: @unchecked Sendable {
     /// The TCP connection is up. Returns false to have it closed.
     func connectionActive(_ handler: ConnectionHandler, connectPipeID: Int?) -> Bool {
         guard phase == .open || phase == .lingering else { return false }
-        guard let id = connectPipeID else { return phase == .open }
+        guard let id = connectPipeID else {
+            guard phase == .open else { return false }
+            events.emit(.accepted(endpoint: handler.endpoint))
+            return true
+        }
         // Only the attempt this pipe is waiting for may take it (not an extra Happy Eyeballs channel).
         guard let pipe = pipes.first(where: { $0.id == id }), case .connecting = pipe.link else { return false }
         pipe.link = .linked(handler)
         handler.attach(pipe)
+        events.emit(.connected(endpoint: handler.endpoint))
         return true
     }
 
@@ -281,6 +338,7 @@ final class SocketCore: @unchecked Sendable {
             pipe.peer = peer
             pipe.reconnectDelay = options.reconnectInterval.timeAmount
             handler.markAttached()
+            events.emit(.handshakeSucceeded(endpoint: handler.endpoint, peerSocketType: peer.socketType ?? ""))
             pipe.scheduleFlush()
             retrySendWaiters()
             return true
@@ -299,6 +357,7 @@ final class SocketCore: @unchecked Sendable {
         handler.attach(pipe)
         handler.markAttached()
         pipes.append(pipe)
+        events.emit(.handshakeSucceeded(endpoint: handler.endpoint, peerSocketType: peer.socketType ?? ""))
         retrySendWaiters()
         return true
     }
@@ -318,11 +377,12 @@ final class SocketCore: @unchecked Sendable {
 
     /// The connection ended (or never came up after the TCP connect).
     func connectionClosed(_ handler: ConnectionHandler) {
+        if handler.isEstablished { events.emit(.disconnected(endpoint: handler.endpoint)) }
         guard let pipe = handler.pipe else { return }
         if pipe.isConnectSide {
             guard case .linked(let current) = pipe.link, current === handler else { return }
             pipe.link = .idle
-            if handler.isAttached { behavior.pipeDetached(pipe) }
+            if handler.wasAttached { behavior.pipeDetached(pipe) }
             scheduleReconnect(pipe)
         } else {
             terminate(pipe)
@@ -378,7 +438,7 @@ final class SocketCore: @unchecked Sendable {
             if pipe.isTerminated && pipe.inbound.isEmpty {
                 remove(pipe)
             } else {
-                pipe.handler?.resumeReadIfNeeded()
+                pipe.connection?.resumeReadIfNeeded()
             }
             return message
         }
@@ -392,7 +452,7 @@ final class SocketCore: @unchecked Sendable {
         if pipe.isTerminated {
             remove(pipe)
         } else {
-            pipe.handler?.resumeReadIfNeeded()
+            pipe.connection?.resumeReadIfNeeded()
         }
     }
 
@@ -425,20 +485,28 @@ final class SocketCore: @unchecked Sendable {
     // MARK: - Connecting
 
     private func connectNow(_ pipe: Pipe) {
-        guard case .connect(let host, let port) = pipe.origin, phase == .open || phase == .lingering else { return }
+        guard case .connect(let target, let endpoint) = pipe.origin, phase == .open || phase == .lingering else { return }
         pipe.link = .connecting
         let core = self
         let pipeID = pipe.id
-        ClientBootstrap(group: loop)
-            .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
+        let bootstrap = ClientBootstrap(group: loop)
             .channelOption(ChannelOptions.autoRead, value: false)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
-                        ConnectionHandler(core: core, connectPipeID: pipeID))
+                        ConnectionHandler(core: core, source: .connect(pipeID: pipeID, endpoint: endpoint)))
                 }
             }
-            .connect(host: host, port: port)
+        let connecting: EventLoopFuture<any Channel>
+        switch target {
+        case .tcp(let host, let port):
+            connecting = bootstrap
+                .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
+                .connect(host: host, port: port)
+        case .ipc(let path):
+            connecting = bootstrap.connect(unixDomainSocketPath: path)
+        }
+        connecting
             .assumeIsolated()
             .whenComplete { result in
                 switch result {
@@ -457,6 +525,9 @@ final class SocketCore: @unchecked Sendable {
             return
         }
         let delay = pipe.reconnectDelay
+        if let endpoint = pipe.connectEndpoint {
+            events.emit(.connectRetried(endpoint: endpoint, after: .nanoseconds(delay.nanoseconds)))
+        }
         if let maximum = options.reconnectIntervalMax?.timeAmount {
             pipe.reconnectDelay = .nanoseconds(min(delay.nanoseconds &* 2, max(maximum.nanoseconds, delay.nanoseconds)))
         }
@@ -491,8 +562,8 @@ final class SocketCore: @unchecked Sendable {
             pipe.link = .stopped
         }
         for listener in listeners {
-            listener.close(promise: nil)
-            closing.append(listener.closeFuture)
+            listener.close()
+            if let channel = listener.channel { closing.append(channel.closeFuture) }
         }
         listeners.removeAll()
         for handler in Array(handlers.values) {
@@ -517,6 +588,8 @@ final class SocketCore: @unchecked Sendable {
         }
         pipes.removeAll()
         handlers.removeAll()
+        events.emit(.closed)
+        events.finish()
         let continuations = closeContinuations
         closeContinuations.removeAll()
         for continuation in continuations { continuation.resume() }

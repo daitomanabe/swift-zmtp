@@ -30,6 +30,9 @@ public struct ZMTPConnection: Sendable {
         case subscribe(ByteBuffer)
         /// The peer cancelled a subscription.
         case cancel(ByteBuffer)
+        /// The peer sent a PING; `ttl` is its time-to-live in tenths of a second (0: none). The PONG
+        /// answer is a `.write` that follows this output, so there is nothing to answer.
+        case pingReceived(ttl: UInt16)
         /// Close the transport. Nothing follows, and `receive` returns nothing from now on.
         case closed(ZMTPError)
     }
@@ -114,6 +117,17 @@ public struct ZMTPConnection: Sendable {
     /// Precondition: `isReady`.
     public func encodeCancel(_ topic: ByteBuffer, into buffer: inout ByteBuffer) {
         encodeSubscription(topic, subscribe: false, into: &buffer)
+    }
+
+    /// Appends a PING command. `ttl` is in tenths of a second: the peer should close the connection if it
+    /// hears nothing for that long (0: no TTL). `context` is echoed by the PONG and is at most 16 bytes.
+    /// The connection sends no timers of its own; the caller decides when to ping.
+    /// Precondition: `isReady`.
+    public func encodePing(ttl: UInt16, context: ByteBuffer, into buffer: inout ByteBuffer) {
+        precondition(isReady, "PING before the handshake finished")
+        precondition(context.readableBytes <= 16, "a PING context is at most 16 bytes")
+        mechanism.encode(
+            WireFrame(flags: .command, body: Command.ping(ttl: ttl, context: context).encodedBody()), into: &buffer)
     }
 
     // MARK: - Writing
@@ -216,7 +230,8 @@ public struct ZMTPConnection: Sendable {
 
     private mutating func handle(command: Command, into outputs: inout [Output]) throws(ZMTPError) {
         switch command {
-        case .ping(_, let context):
+        case .ping(let ttl, let context):
+            outputs.append(.pingReceived(ttl: ttl))
             var buffer = ByteBuffer()
             mechanism.encode(WireFrame(flags: .command, body: Command.pong(context: context).encodedBody()), into: &buffer)
             outputs.append(.write(buffer))

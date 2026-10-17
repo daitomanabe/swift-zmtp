@@ -41,6 +41,7 @@ private func events(_ outputs: [Output]) -> [String] {
         case .message(let frames): "message:" + frames.map(text).joined(separator: "|")
         case .subscribe(let topic): "subscribe:\(text(topic))"
         case .cancel(let topic): "cancel:\(text(topic))"
+        case .pingReceived(let ttl): "ping:\(ttl)"
         case .closed(let error): "closed:\(error)"
         }
     }
@@ -175,7 +176,7 @@ func pubSeesSubscribeAndCancel(_ name: String) throws {
 @Test func pingIsAnsweredWithPong() throws {
     var pull = connection(.pull)
     let outputs = feed(&pull, try Fixture.named("null-heartbeat").clientStream)
-    #expect(events(outputs) == ["ready:PUSH", "message:hello"])
+    #expect(events(outputs) == ["ready:PUSH", "message:hello", "ping:5"])
     guard case .write(let pong)? = outputs.last else {
         Issue.record("the last output is not a write: \(outputs)")
         return

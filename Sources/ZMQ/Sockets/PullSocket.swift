@@ -18,6 +18,8 @@ public final class PullSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Waits for the next message. Cancelling the task ends the wait with `CancellationError`
     /// and loses no message.
     public func receive() async throws -> Message {

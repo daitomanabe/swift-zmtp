@@ -19,6 +19,8 @@ public final class PushSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Queues `message` for one peer. Waits while every peer is at the send high-water mark (or there
     /// is none); cancelling the task ends the wait with `CancellationError` and sends nothing.
     public func send(_ message: Message) async throws {

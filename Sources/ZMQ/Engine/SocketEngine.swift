@@ -71,6 +71,11 @@ final class SocketEngine: Sendable {
         }
     }
 
+    /// A new stream of the socket's connection events (`SocketEvent`).
+    func events() -> AsyncStream<SocketEvent> {
+        core.events.makeStream()
+    }
+
     func close() async {
         let core = core
         await withTaskCancellationHandler {

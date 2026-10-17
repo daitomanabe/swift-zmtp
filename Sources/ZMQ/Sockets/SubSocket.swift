@@ -19,6 +19,8 @@ public final class SubSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Subscribes to messages whose first frame starts with `prefix` (the empty prefix: everything).
     /// Works before the socket is bound or connected, and again after a reconnect. Subscribing to the
     /// same prefix twice needs two `unsubscribe` calls.

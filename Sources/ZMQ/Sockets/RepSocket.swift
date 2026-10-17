@@ -19,6 +19,8 @@ public final class RepSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Waits for the next request, taking the peers in turn. Throws `ZMQError.invalidState` when the
     /// previous request has not been answered. Cancelling the task ends the wait with
     /// `CancellationError` and loses no request.
@@ -72,7 +74,7 @@ final class RepBehavior: SocketBehavior {
         }
         openRequest = nil
         // A requester that is gone or at its high-water mark misses the answer (as with libzmq).
-        guard let pipe = request.pipe, pipe.canAccept, pipe.handler?.isAttached == true else { return }
+        guard let pipe = request.pipe, pipe.canAccept, pipe.connection?.isAttached == true else { return }
         pipe.enqueue(request.envelope + frames)
     }
 

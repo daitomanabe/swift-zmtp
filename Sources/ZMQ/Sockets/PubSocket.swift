@@ -18,6 +18,8 @@ public final class PubSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Queues `message` for every peer that subscribed to a prefix of its first frame. A peer whose
     /// queue is full misses the message; without a matching subscriber the message is dropped. Does not
     /// wait for any peer.

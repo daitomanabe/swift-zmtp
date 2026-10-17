@@ -19,6 +19,8 @@ public final class RouterSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     /// Waits for the next message from any peer, taking the peers in turn. The routing ID is the
     /// peer's `routingID` option if it set one; otherwise the socket makes one up (5 bytes, the first
     /// is 0). `message` holds the frames as the peer sent them: a REQ peer's message therefore starts

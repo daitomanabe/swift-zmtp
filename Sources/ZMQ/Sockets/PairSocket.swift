@@ -20,6 +20,8 @@ public final class PairSocket: ZMQSocket {
 
     public func close() async { await engine.close() }
 
+    public func events() -> AsyncStream<SocketEvent> { engine.events() }
+
     public func send(_ message: Message) async throws {
         try await engine.send(message.wireFrames())
     }
