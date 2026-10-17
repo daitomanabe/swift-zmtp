@@ -1,0 +1,99 @@
+{
+  "name": "null-pub-sub",
+  "description": "NULL, ZMTP 3.1 on both sides. SUBSCRIBE and CANCEL go as commands; the PUB filters, so 'x skipped' never reaches the wire.",
+  "libzmq": "4.3.5",
+  "pyzmq": "27.2.0",
+  "client": {
+    "socketType": "SUB",
+    "role": "connect",
+    "options": {}
+  },
+  "server": {
+    "socketType": "PUB",
+    "role": "bind",
+    "options": {}
+  },
+  "events": [
+    {
+      "side": "client",
+      "action": "setsockopt",
+      "option": "SUBSCRIBE",
+      "value": "w"
+    },
+    {
+      "side": "server",
+      "action": "send",
+      "frames": [
+        "7820736b6970706564"
+      ]
+    },
+    {
+      "side": "server",
+      "action": "send",
+      "frames": [
+        "772068656c6c6f"
+      ]
+    },
+    {
+      "side": "client",
+      "action": "recv",
+      "frames": [
+        "772068656c6c6f"
+      ]
+    },
+    {
+      "side": "client",
+      "action": "setsockopt",
+      "option": "UNSUBSCRIBE",
+      "value": "w"
+    }
+  ],
+  "clientToServer": "ff00000000000000017f03014e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d5479706500000003535542040b095355425343524942457704080643414e43454c77",
+  "serverToClient": "ff00000000000000017f03014e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d54797065000000035055420007772068656c6c6f",
+  "chunks": [
+    {
+      "from": "client",
+      "hex": "ff00000000000000017f"
+    },
+    {
+      "from": "server",
+      "hex": "ff00000000000000017f"
+    },
+    {
+      "from": "server",
+      "hex": "03"
+    },
+    {
+      "from": "client",
+      "hex": "03"
+    },
+    {
+      "from": "client",
+      "hex": "014e554c4c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "from": "server",
+      "hex": "014e554c4c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "from": "server",
+      "hex": "04190552454144590b536f636b65742d5479706500000003505542"
+    },
+    {
+      "from": "client",
+      "hex": "04190552454144590b536f636b65742d5479706500000003535542"
+    },
+    {
+      "from": "client",
+      "hex": "040b0953554253435249424577"
+    },
+    {
+      "from": "server",
+      "hex": "0007772068656c6c6f"
+    },
+    {
+      "from": "client",
+      "hex": "04080643414e43454c77"
+    }
+  ]
+}

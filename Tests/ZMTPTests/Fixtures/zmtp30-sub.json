@@ -1,0 +1,69 @@
+{
+  "name": "zmtp30-sub",
+  "description": "libzmq SUB (ZMTP 3.1) against a fake ZMTP 3.0 PUB. libzmq sends the subscription as a message starting with 0x01 and the cancel with 0x00, not as commands.",
+  "libzmq": "4.3.5",
+  "pyzmq": "27.2.0",
+  "client": {
+    "socketType": "SUB",
+    "role": "connect",
+    "options": {}
+  },
+  "server": {
+    "socketType": "PUB",
+    "role": "bind",
+    "options": {},
+    "implementation": "fake ZMTP 3.0 peer in Tools/interop/record_fixtures.py"
+  },
+  "events": [
+    {
+      "side": "client",
+      "action": "setsockopt",
+      "option": "SUBSCRIBE",
+      "value": "w"
+    },
+    {
+      "side": "server",
+      "action": "send",
+      "frames": [
+        "772068656c6c6f"
+      ]
+    },
+    {
+      "side": "client",
+      "action": "recv",
+      "frames": [
+        "772068656c6c6f"
+      ]
+    },
+    {
+      "side": "client",
+      "action": "setsockopt",
+      "option": "UNSUBSCRIBE",
+      "value": "w"
+    }
+  ],
+  "clientToServer": "ff00000000000000017f03014e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d54797065000000035355420002017700020077",
+  "serverToClient": "ff00000000000000007f03004e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d54797065000000035055420007772068656c6c6f",
+  "chunks": [
+    {
+      "from": "client",
+      "hex": "ff00000000000000017f"
+    },
+    {
+      "from": "server",
+      "hex": "ff00000000000000007f03004e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d5479706500000003505542"
+    },
+    {
+      "from": "client",
+      "hex": "03014e554c4c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004190552454144590b536f636b65742d547970650000000353554200020177"
+    },
+    {
+      "from": "server",
+      "hex": "0007772068656c6c6f"
+    },
+    {
+      "from": "client",
+      "hex": "00020077"
+    }
+  ]
+}
