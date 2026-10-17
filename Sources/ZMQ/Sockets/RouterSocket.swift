@@ -1,0 +1,99 @@
+import NIOCore
+import ZMTP
+
+/// Talks to many peers at once and addresses each by a routing ID: `receive()` says which peer a
+/// message came from, `send(_:to:)` picks the peer to send to.
+public final class RouterSocket: ZMQSocket {
+    private let engine: SocketEngine
+
+    public var options: SocketOptions { engine.options }
+
+    public init(context: ZMQContext = .default, options: SocketOptions = SocketOptions()) {
+        engine = SocketEngine(context: context, options: options, behavior: RouterBehavior())
+    }
+
+    @discardableResult
+    public func bind(_ endpoint: String) async throws -> String { try await engine.bind(endpoint) }
+
+    public func connect(_ endpoint: String) async throws { try await engine.connect(endpoint) }
+
+    public func close() async { await engine.close() }
+
+    /// Waits for the next message from any peer, taking the peers in turn. The routing ID is the
+    /// peer's `routingID` option if it set one; otherwise the socket makes one up (5 bytes, the first
+    /// is 0). `message` holds the frames as the peer sent them: a REQ peer's message therefore starts
+    /// with an empty frame, and a reply to it must start with one as well. Cancelling the task ends the
+    /// wait with `CancellationError` and loses no message.
+    public func receive() async throws -> RoutedMessage {
+        var frames = try await engine.receive()
+        let routingID = RoutingID(Frame(buffer: frames.removeFirst()))
+        return RoutedMessage(routingID: routingID, message: Message(wireFrames: frames))
+    }
+
+    /// Sends `message` to the peer with `routingID`. A routing ID nobody has, or a peer at its send
+    /// high-water mark, drops the message silently; this call never waits and does not throw for it.
+    public func send(_ message: Message, to routingID: RoutingID) async throws {
+        try await engine.send([routingID.frame.buffer] + message.wireFrames())
+    }
+
+    /// Every message until the socket is closed.
+    public var messages: MessageSequence<RoutedMessage> {
+        MessageSequence { try await self.receive() }
+    }
+}
+
+final class RouterBehavior: SocketBehavior {
+    private var pipesByID: [ByteBuffer: Pipe] = [:]
+    private var idsByPipe: [Int: ByteBuffer] = [:]
+    /// Next number for a generated routing ID; starts at a random value.
+    private var nextGenerated = UInt32.random(in: .min ... .max)
+
+    init() { super.init(socketType: .router) }
+
+    /// Registers the peer's routing ID: its Identity, or a generated one when that is empty. An Identity
+    /// that another connection already uses refuses the new connection.
+    override func pipeAttached(_ pipe: Pipe, peer: Metadata) -> Bool {
+        unregister(pipe)
+        var id: ByteBuffer
+        if let identity = peer.identity, identity.readableBytes > 0 {
+            id = ByteBuffer(bytes: identity.readableBytesView)
+            if pipesByID[id] != nil { return false }
+        } else {
+            repeat { id = generatedID() } while pipesByID[id] != nil
+        }
+        pipesByID[id] = pipe
+        idsByPipe[pipe.id] = id
+        return true
+    }
+
+    override func pipeDetached(_ pipe: Pipe) { unregister(pipe) }
+
+    override func pipeRemoved(_ pipe: Pipe) { unregister(pipe) }
+
+    private func unregister(_ pipe: Pipe) {
+        guard let id = idsByPipe.removeValue(forKey: pipe.id) else { return }
+        if pipesByID[id] === pipe { pipesByID[id] = nil }
+    }
+
+    /// 0x00 followed by a big-endian counter.
+    private func generatedID() -> ByteBuffer {
+        var id = ByteBuffer()
+        id.writeInteger(UInt8(0))
+        id.writeInteger(nextGenerated)
+        nextGenerated &+= 1
+        return id
+    }
+
+    /// `frames[0]` is the routing ID, the rest is the message. Unknown ID or full pipe: dropped.
+    override func trySend(_ frames: [ByteBuffer]) throws -> SendOutcome {
+        guard frames.count >= 2, let pipe = pipesByID[frames[0]], pipe.canAccept else { return .accepted }
+        pipe.enqueue(Array(frames.dropFirst()))
+        return .accepted
+    }
+
+    /// The routing ID of the source pipe goes in front of the frames.
+    override func received(_ frames: [ByteBuffer], from pipe: Pipe) -> InboundMessage? {
+        guard let id = idsByPipe[pipe.id] else { return nil }
+        return InboundMessage(frames: [id] + frames)
+    }
+}

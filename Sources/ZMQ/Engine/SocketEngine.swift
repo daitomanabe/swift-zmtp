@@ -41,6 +41,23 @@ final class SocketEngine: Sendable {
         }
     }
 
+    /// Runs `body` on the socket's event loop with the behavior of this socket, for calls that are neither
+    /// a plain send nor a plain receive (SUB subscribe, REP reply, REQ abandoning a request). Throws
+    /// `ZMQError.socketClosed` once the socket is closing. Not cancellable: it runs to the end, so it can
+    /// be used from a task that is already cancelled.
+    func perform<Behavior: SocketBehavior, Result: Sendable>(
+        _ body: @escaping @Sendable (Behavior) throws -> Result
+    ) async throws -> Result {
+        let core = core
+        return try await core.loop.submit {
+            guard core.phase == .open else { throw ZMQError.socketClosed }
+            guard let behavior = core.behavior as? Behavior else {
+                preconditionFailure("socket behavior is not a \(Behavior.self)")
+            }
+            return try body(behavior)
+        }.get()
+    }
+
     /// Waits for the next message.
     func receive() async throws -> [ByteBuffer] {
         let core = core

@@ -85,11 +85,12 @@ final class Pipe {
         scheduleFlush()
     }
 
-    /// Writes a SUBSCRIBE or CANCEL for `topic` to the current connection right away, if it is up.
+    /// Writes a SUBSCRIBE or CANCEL for `topic` to the current connection right away, if its handshake
+    /// is done (this includes the time inside `pipeAttached`, before the pipe is marked attached).
     /// Subscriptions do not count against the high-water mark and are not kept for a later connection;
     /// a SUB socket sends its whole set again from `pipeAttached`.
     func writeSubscription(_ topic: ByteBuffer, subscribe: Bool) {
-        guard let handler, handler.isAttached, let channel = handler.channel, channel.isActive else { return }
+        guard let handler, handler.isReady, let channel = handler.channel, channel.isActive else { return }
         var buffer = channel.allocator.buffer(capacity: topic.readableBytes + 16)
         handler.encodeSubscription(topic, subscribe: subscribe, into: &buffer)
         channel.writeAndFlush(buffer, promise: nil)

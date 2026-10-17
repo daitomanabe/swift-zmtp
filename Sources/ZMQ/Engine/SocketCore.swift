@@ -288,7 +288,12 @@ final class SocketCore: @unchecked Sendable {
         // Bind side: the connection becomes a pipe now.
         guard phase == .open else { return false }
         let pipe = Pipe(core: self, id: makePipeID(), origin: .bind)
-        guard behavior.pipeAttached(pipe, peer: peer) else { return false }
+        // Linked before the hook runs, so the hook can write to the connection (SUB sends its subscriptions).
+        pipe.link = .linked(handler)
+        guard behavior.pipeAttached(pipe, peer: peer) else {
+            pipe.link = .stopped
+            return false
+        }
         pipe.peer = peer
         pipe.link = .linked(handler)
         handler.attach(pipe)
@@ -380,10 +385,22 @@ final class SocketCore: @unchecked Sendable {
         return nil
     }
 
+    /// Throws away the messages received on `pipe` that nobody has read yet (REQ drops an unwanted reply).
+    func discardInbound(of pipe: Pipe) {
+        loop.preconditionInEventLoop()
+        pipe.inbound.removeAll()
+        if pipe.isTerminated {
+            remove(pipe)
+        } else {
+            pipe.handler?.resumeReadIfNeeded()
+        }
+    }
+
     // MARK: - Blocked senders
 
-    /// Serves parked senders in order for as long as the type accepts their messages.
-    private func retrySendWaiters() {
+    /// Serves parked senders in order for as long as the type accepts their messages. A type whose state
+    /// changes without a pipe event (REQ going back to idle) calls this itself.
+    func retrySendWaiters() {
         while phase == .open, let waiter = sendWaiters.first {
             do {
                 switch try behavior.trySend(waiter.payload) {
