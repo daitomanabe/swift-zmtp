@@ -47,10 +47,11 @@ public final class SubSocket: ZMQSocket {
     }
 }
 
-final class SubBehavior: SocketBehavior {
+/// The subscription counting of SUB. XSUB subclasses it and drops the local filtering.
+class SubBehavior: SocketBehavior {
     private var subscriptions = SubscriptionSet()
 
-    init() { super.init(socketType: .sub) }
+    override init(socketType: SocketType = .sub) { super.init(socketType: socketType) }
 
     func subscribe(_ prefix: ByteBuffer) {
         guard subscriptions.add(prefix) else { return }

@@ -28,36 +28,53 @@ public final class PubSocket: ZMQSocket {
     }
 }
 
-final class PubBehavior: SocketBehavior {
+/// The sending side of PUB. XPUB subclasses it and adds the reporting of subscriptions.
+class PubBehavior: SocketBehavior {
     /// What each pipe subscribed to, by pipe ID. A pipe without an entry gets nothing.
     private var subscriptions: [Int: SubscriptionSet] = [:]
 
-    init() { super.init(socketType: .pub) }
+    override init(socketType: SocketType = .pub) { super.init(socketType: socketType) }
+
+    /// `pipe` now holds a subscription to `prefix` (a repeated SUBSCRIBE of the same prefix changes nothing).
+    func prefixSubscribed(_ prefix: ByteBuffer, on pipe: Pipe) {}
+
+    /// `pipe` no longer holds `prefix`: it was cancelled, or the pipe lost all its subscriptions.
+    func prefixCancelled(_ prefix: ByteBuffer, on pipe: Pipe) {}
+
+    private func dropSubscriptions(of pipe: Pipe) {
+        guard let set = subscriptions.removeValue(forKey: pipe.id) else { return }
+        for prefix in set.prefixes { prefixCancelled(prefix, on: pipe) }
+    }
 
     override func pipeAttached(_ pipe: Pipe, peer: Metadata) -> Bool {
         // A new connection starts without subscriptions; the SUB side sends its set again.
-        subscriptions[pipe.id] = nil
+        dropSubscriptions(of: pipe)
         return true
     }
 
     override func pipeDetached(_ pipe: Pipe) {
-        subscriptions[pipe.id] = nil
+        dropSubscriptions(of: pipe)
         // Messages that were chosen for the old subscriber and never written go with it.
         pipe.outbound.removeAll()
     }
 
     override func pipeRemoved(_ pipe: Pipe) {
-        subscriptions[pipe.id] = nil
+        dropSubscriptions(of: pipe)
     }
 
     override func peerSubscribed(_ topic: ByteBuffer, on pipe: Pipe) {
-        _ = subscriptions[pipe.id, default: SubscriptionSet()].add(topic)
+        // A copy: the topic is a slice of a network read and would keep all of it alive.
+        let topic = ByteBuffer(bytes: topic.readableBytesView)
+        if subscriptions[pipe.id, default: SubscriptionSet(countsDuplicates: false)].add(topic) {
+            prefixSubscribed(topic, on: pipe)
+        }
     }
 
     override func peerCancelled(_ topic: ByteBuffer, on pipe: Pipe) {
         guard var set = subscriptions[pipe.id] else { return }
-        _ = set.remove(topic)
+        let last = set.remove(topic)
         subscriptions[pipe.id] = set.isEmpty ? nil : set
+        if last { prefixCancelled(topic, on: pipe) }
     }
 
     override func trySend(_ frames: [ByteBuffer]) throws -> SendOutcome {

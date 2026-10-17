@@ -21,7 +21,9 @@
 //   - `pipeCreated`, `pipeAttached(pipe, peer:)`, `pipeDetached`, `pipeRemoved`: per-pipe hooks. After
 //     every handshake `pipeAttached` runs (SUB re-sends its subscriptions with `Pipe.writeSubscription`,
 //     ROUTER registers the peer Identity, PAIR refuses a second peer by returning false).
-//   - `peerSubscribed` / `peerCancelled`: SUBSCRIBE and CANCEL received from the peer (PUB).
+//   - `peerSubscribed` / `peerCancelled`: SUBSCRIBE and CANCEL received from the peer (PUB, XPUB).
+//   - `queueInbound(_:)`: a type can put an item of its own into the receive queue, one that did not arrive
+//     as a message (XPUB reports "first subscriber" and "last subscriber left" this way).
 // Transports: a pipe talks to its peer through a `PipeConnection` (PipeConnection.swift). TCP and IPC
 // connections are NIO channels driven by `ConnectionHandler`, which also keeps the handshake timeout and
 // heartbeat clocks. An inproc link has no channel: `InprocConnection` passes messages to the other
@@ -93,6 +95,8 @@ final class SocketCore: @unchecked Sendable {
     /// Inproc links that are up or being set up, until they end.
     var inprocLinks: [ObjectIdentifier: InprocConnection] = [:]
     private var receiveWaiters = CircularBuffer<Waiter<[ByteBuffer]>>()
+    /// Items the behavior queued itself (`queueInbound`); read before the messages of the pipes.
+    private var queuedInbound = CircularBuffer<SocketBehavior.InboundMessage>()
     private var sendWaiters = CircularBuffer<Waiter<Void>>()
     private var loadBalanceCursor = 0
     private var fairQueueCursor = 0
@@ -127,6 +131,22 @@ final class SocketCore: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// Puts an item that is not a received message into the receive queue (XPUB's subscription notices).
+    /// It goes to a waiting `receive()` at once, else it waits in a queue of its own that is read before
+    /// the pipes' messages. Such items do not count against `receiveHighWaterMark` (the connection must
+    /// keep reading subscriptions even when the application is slow) and `delivered` is not called for
+    /// them. Ignored once the socket is closing. Call on the loop.
+    func queueInbound(_ item: SocketBehavior.InboundMessage) {
+        loop.preconditionInEventLoop()
+        guard phase == .open else { return }
+        if let waiter = receiveWaiters.popFirst() {
+            // A waiting receive() means every queue is empty, so this item is the next in line.
+            waiter.succeed(item.frames)
+        } else {
+            queuedInbound.append(item)
+        }
     }
 
     // MARK: - Calls from the application (arrive through loop.execute)
@@ -449,6 +469,7 @@ final class SocketCore: @unchecked Sendable {
 
     /// The next received message in fair-queue order (round-robin over the pipes that have one).
     private func dequeueInbound() -> SocketBehavior.InboundMessage? {
+        if let item = queuedInbound.popFirst() { return item }
         let count = pipes.count
         guard count > 0 else { return nil }
         for step in 0..<count {
@@ -622,6 +643,7 @@ final class SocketCore: @unchecked Sendable {
             if !alreadyRemoved { behavior.pipeRemoved(pipe) }
         }
         pipes.removeAll()
+        queuedInbound.removeAll()
         handlers.removeAll()
         inprocLinks.removeAll()
         events.emit(.closed)

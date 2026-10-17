@@ -310,7 +310,7 @@ public struct MessageSequence<Element: Sendable>: AsyncSequence, Sendable { … 
 | ROUTER | 先頭の routing ID の pipe へ。知らない ID・満ちた pipe には捨てる | 公平な受信。送り元の routing ID を付けて返す |
 
 - **購読の数え方**:SUB は前方一致ごとに数を持ち、0 → 1 のときだけ SUBSCRIBE、1 → 0 のときだけ CANCEL を全 pipe へ送る。
-  pipe の握手が済むたびに、持っている前方一致を 1 つずつ送る(つなぎ直しのあとも)。PUB は pipe ごとに前方一致の数を持つ(重なりも数える)
+  pipe の握手が済むたびに、持っている前方一致を 1 つずつ送る(つなぎ直しのあとも)。PUB は pipe ごとに前方一致の**集合**を持つ(同じ前方一致の SUBSCRIBE が重なっても 1 つ、CANCEL 1 つで消える。2026-10-17 に直した:libzmq の SUB は購読のたびに SUBSCRIBE を送り、CANCEL は最後の取り消しでだけ送るので、数えると取り消したあとも送り続ける)
 - **ROUTER の routing ID**:相手の Identity が空でなければそれ。すでに使われていれば新しい接続を閉じる(libzmq の既定)。
   空なら 5 バイト `00` + UInt32(ビッグエンディアン、乱数から始めて 1 ずつ増やす)
 - **REQ の取り消し**:`request` が取り消されたら送れる状態に戻す。その pipe に「捨てる返事 1 つ」を数えておき、次にその pipe から来た返事を 1 つ捨てる
@@ -481,3 +481,17 @@ API は足さない。`withThrowingTaskGroup` でソケットごとに `messages
 - XPUB ← pyzmq の SUB(購読の知らせが届く)、XSUB → pyzmq の XPUB(購読が届き、メッセージを受ける)
 - ハートビート:Swift の PUSH(ハートビートあり)と pyzmq の PULL。相手のプロセスを `SIGSTOP` で止めると、時間切れで `disconnected` が出る。
   `SIGCONT` で戻すと、つなぎ直して `handshakeSucceeded` が出て、次のメッセージが届く
+
+### 5.10 実装で決めたこと(段階 2、2026-10-17)
+
+- 接続の抽象化は `Sources/ZMQ/Engine/PipeConnection.swift`。TCP と IPC は `ConnectionHandler`、inproc は `InprocConnection`
+- IPC:前の実行が残したファイル(ソケットでも普通のファイルでも)は自分で消してから bind する。閉じるときは、自分が作ったファイル
+  (デバイスと inode で確かめる)だけを消す。パスの上限は 103 バイト
+- ハートビート:最初の PING は握手の 1 間隔あと。受けの列が満ちて読むのを止めているあいだは、時間切れで閉じずに見張りをやり直す
+  (相手の返事がカーネルに届いているかもしれないため)
+- 出来事:つながった接続(`connected` か `accepted`)は必ず `disconnected` で終わる。握手の前に切れたら `handshakeFailed` も出す。
+  閉じたあとの `events()` はすぐ終わる列を返す
+- inproc:bind の側が受け入れたときに `connected` を出す。断られたら TCP と同じ間隔でやり直し、相手が閉じたら(時計なしで)次の bind を待つ。
+  受けの列に空きができたとき、止めていた「済んだ」をまとめて返すので、受けの列は送り手の HWM の分だけ超えることがある
+- XPUB の知らせ(`subscribe` / `unsubscribe`)は、受けの HWM に数えない別の列に入り、上流からのデータより先に読まれる
+- proxy は `ZMQProxy.run(frontend:backend:)`(XSUB↔XPUB、ROUTER↔DEALER、PULL→PUSH)。公開 API だけで作ってある
