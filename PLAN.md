@@ -9,7 +9,7 @@
 - ほかの言語には、libzmq を使わない実装がある(Java の JeroMQ、C# の NetMQ、Rust の zmq.rs・omq.rs、Erlang の chumak、
   Go の go-zeromq/zmq4)。Swift にはまだ無い。
 - 提案:**ZMTP 3.1 を Swift だけで実装し、libzmq や pyzmq と通信できるライブラリを作る**。
-  C/C++ のコード、Homebrew、XCFramework、libsodium をどれも要らなくし、Swift Concurrency(async/await・Sendable)で使える形にする。
+  C のライブラリ(libzmq・libsodium)、Homebrew、XCFramework をどれも要らなくし、Swift Concurrency(async/await・Sendable)で使える形にする。
 - 「今すぐ Swift から使えればよい」だけなら、既存の szq で足りる(2.1)。新しく作る価値は次の 3 つにある:
   C を使わない(SwiftPM だけで入る)、iOS にもそのまま入る、async/await で書ける。
 
@@ -61,13 +61,34 @@ GitHub で言語を Swift に絞って `zmtp` を探すと 0 件だった。
 - CURVE に要る暗号:X25519 は CryptoKit(Linux では swift-crypto)にある。XSalsa20-Poly1305(NaCl の crypto_box)は無いので、
   Swift で書いて NaCl のテストベクタで確かめる。
 - この Mac の状態:Homebrew の zeromq 4.3.5 と libsodium 1.0.22 が入っている。pyzmq は入っていない(uv で一時的に使える)。
-  Swift 6.3.2。Xcode は無く、Command Line Tools だけ。
+  Swift 6.3.2。Xcode は無く、Command Line Tools だけ。Command Line Tools の Swift Testing は、SwiftPM が場所を渡さないので
+  `swift test` のままでは動かない → `Scripts/test.sh` が場所を足して走らせる(2026-10-17)。
+
+### 2.5 libzmq 同士のバイト列を記録して分かったこと(段階 0、2026-10-17)
+
+`Tools/interop/record_fixtures.py` で pyzmq 27.2.0(libzmq 4.3.5)同士のあいだに中継を挟んで記録した。
+固定データは `Tests/ZMTPTests/Fixtures/` の 9 件。段階 1 で合わせる必要がある細部:
+
+- **挨拶を 3 回に分けて送る**:署名の 10 バイト → 相手の署名が届いたら版の上位 1 バイト → 相手の上位の版が届いたら残りの 53 バイト。
+  こちらは 64 バイトを一度に送ってよい(偽の 3.0 の相手で確かめた)。受けるときは途中までの挨拶を扱えること
+- **署名の 8 バイトの詰め物は 0 とは限らない**:ROUTING_ID の長さ + 1 を 64 ビットのビッグエンディアンで入れてくる(ZMTP 1.0 との互換のため)。
+  ROUTING_ID が `dealer-1`(8 バイト)なら `…09`。読むときは無視する
+- **as-server の 1 バイトはいつも 0**:PLAIN・CURVE のサーバーでも 0。こちらの判定に使わない
+- **READY の Identity**:REQ・DEALER・ROUTER だけが送る(値が空でも送る)。PUSH・PULL・PUB・SUB・REP・PAIR は Socket-Type だけ
+- **購読**:3.1 の相手には SUBSCRIBE / CANCEL のコマンド、3.0 の相手には先頭 0x01 / 0x00 のメッセージ。PUB の側で絞るので、
+  購読に合わないメッセージは線の上に出ない
+- **ハートビート**:PING の本体は TTL の 2 バイト(HEARTBEAT_TTL 500 ms → `0005`)だけで、文脈は空。PONG は空の文脈を返す
+- **PLAIN**:HELLO の本体は 長さ 1 バイト + ユーザー名、長さ 1 バイト + パスワード。WELCOME は空。クライアントの INITIATE と
+  サーバーの READY にメタデータが入る
+- **CURVE の MESSAGE は、コマンドの印(0x04)を立てない普通のフレームで届く**。本体が `\x07MESSAGE` で始まる。
+  段階 3 で、コマンドとしてではなくこの形で読み書きする
 
 ## 3. 何を作るか
 
 ### 3.1 目標
 
-- SwiftPM だけで入る。C/C++ のコード、Homebrew、XCFramework、libsodium を要らない(依存は Swift で書かれたものだけ)
+- SwiftPM だけで入る。C のライブラリ(libzmq・libsodium)、Homebrew、XCFramework を要らない。依存は SwiftPM だけで揃うもの
+  (SwiftNIO の中の小さな C の部品は SwiftPM が自動でビルドする)
 - libzmq 4.3.x と pyzmq の両方と通信できる(TCP・IPC、NULL・PLAIN・CURVE)
 - Swift 6 の言語モードで警告が出ない。ソケットは Sendable で、どの Task からでも使える
 - async/await と AsyncSequence で書ける
@@ -144,12 +165,14 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 
 各段階の終わりに「何ができるようになったか」を、pyzmq を相手にした通信で確かめる。大きさは 小 / 中 / 大 のおおよそ。
 
-### 段階 0:下準備(小)
+### 段階 0:下準備(小)— 済み(2026-10-17)
 
 - SwiftPM のパッケージの骨組み。Swift 6 の言語モード
 - 相手役:`uv run --with pyzmq` で動く Python のスクリプト(pyzmq は libzmq を同梱している)
 - libzmq 同士の挨拶と握手のバイト列を記録し、テストの固定データにする(NULL / PLAIN / CURVE、3.0 と 3.1)
 - できあがり:`swift build` が通る。固定データが Tests に入っている
+- 結果:パッケージ `swift-zmtp`(ターゲット `ZMTP`・`ZMQ`、SwiftNIO 2.104)、`Scripts/test.sh`、`Tools/interop/peer.py`
+  (pyzmq 27.2.0 に固定)、`Tools/interop/record_fixtures.py`、固定データ 9 件。分かったことは 2.5
 
 ### 段階 1:最小で使える版(大)
 
@@ -216,13 +239,15 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 
 ## 7. 決めてほしいこと
 
-1. **方式**:Swift だけで作る(推奨)/ libzmq を包む、使いやすい版を作る(この場合は szq を使うか、szq に足りない async/await を足す形になる)
-2. **I/O の土台**:SwiftNIO(推奨)/ Network.framework / 自作
-3. **対応する OS の下限**:macOS 15・iOS 18・Linux(Swift 6)を推奨。Synchronization の Mutex と Atomic が使える
-4. **ライセンスと公開**:まず非公開(GitHub の非公開リポジトリか、リモートなし)で始め、公開するときに MIT か MPL-2.0 を選ぶ。
+1〜3 は 2026-10-17 に推奨案で決まった。
+
+1. **方式**:Swift だけで作る — 決定
+2. **I/O の土台**:SwiftNIO — 決定
+3. **対応する OS の下限**:macOS 15・iOS 18・Linux(Swift 6)— 決定
+4. **ライセンスと公開**(未定。決まるまではリモートなしで進める):まず非公開(GitHub の非公開リポジトリか、リモートなし)で始め、公開するときに MIT か MPL-2.0 を選ぶ。
    libzmq のコードを写さず、仕様から書くので、libzmq の MPL-2.0 には縛られない
-5. **名前**:案はパッケージ `swift-zmtp`、モジュール `ZMQ`(Swift で `zmtp` の名前は使われていない)
-6. **最初に使う場面**:どのアプリとどのアプリをつなぐか(たとえば Mac の Swift アプリと、Linux の Python の推論サーバー)。
+5. **名前**:案はパッケージ `swift-zmtp`、モジュール `ZMQ`(Swift で `zmtp` の名前は使われていない)。今はこの仮の名前で進めている
+6. **最初に使う場面**(未定):どのアプリとどのアプリをつなぐか(たとえば Mac の Swift アプリと、Linux の Python の推論サーバー)。
    段階 1 で先に作るソケットの型の順番をこれで決める
 
 ## 8. 進め方
