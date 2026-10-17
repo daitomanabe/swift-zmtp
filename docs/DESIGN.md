@@ -673,3 +673,15 @@ Box[X](A→B) = A の秘密鍵と B の公開鍵で作る箱(MAC 16 + 暗号文)
 3. CURVE(7.4)— 1 と 2 のあと
 4. 暗号の部分を設計の側(Opus)が読んで見直す
 5. pyzmq との通信のテスト:PLAIN と CURVE を両方向で、受け入れる場合と断る場合(違うパスワード、違うサーバー鍵、許していないクライアント鍵)
+
+### 7.6 実装で決めたこと(段階 3、2026-10-18)
+
+- 暗号の部品は `Sources/ZMTPCrypto/`(`package` だけ)。CURVE の MESSAGE は出力のバッファの中で直に封をする(写しは 1 回)。開けるときは新しいバッファへ 1 回
+- 方式の設定は `ZMTPConnection.Configuration.mechanism`(`MechanismConfiguration`)。認証は `Output.authenticate(AuthenticationRequest)` で外へ頼み、
+  `completeAuthentication(allowed:)` で答えを入れる。`ConnectionHandler` は接続の通し番号で答えを照らし合わせ、遅れた答えは捨てる
+- PLAIN のサーバーは、認証を待つあいだに届いたバイトを 16 KiB まで持っておく(libzmq はこの間のコマンドを誤りとする)
+- CURVE のサーバーは、正しい HELLO が開いてから S'/s' と cookie 鍵を作る。鍵の大きさ・公開鍵と秘密鍵の組・使えない相手の鍵は `start()` で
+  `invalidConfiguration` として閉じる。中の印の予約ビットは無視し(libzmq と同じ)、COMMAND と MORE が両方立っていたら誤り。
+  `maxMessageSize` は暗号化したフレーム(中身より 33 バイト大きい)に当てる
+- libzmq の PLAIN の ERROR は名前が `5E 'RROR'` に崩れている(C の `"\x05ERROR"`)。PLAIN の握手の中ではこの形も ERROR として読む。送るのは仕様の形
+

@@ -5,10 +5,9 @@ no libzmq, no libsodium, no XCFramework. Sockets are built on SwiftNIO and used 
 
 日本語は [README.ja.md](README.ja.md)。
 
-> **Early version.** Stages 1 and 2 of the [plan](PLAN.md) are done: the transports `tcp://`, `ipc://` and
-> `inproc://`, the NULL mechanism (no authentication), heartbeats, socket events, and the socket types PUSH, PULL,
-> PUB, SUB, XPUB, XSUB, REQ, REP, DEALER, ROUTER and PAIR, plus a proxy. The API will change before 1.0.
-> PLAIN and CURVE come next.
+> **Early version.** Stages 1 to 3 of the [plan](PLAN.md) are done: the transports `tcp://`, `ipc://` and
+> `inproc://`; the security mechanisms NULL, PLAIN and CURVE; heartbeats; socket events; and the socket types PUSH,
+> PULL, PUB, SUB, XPUB, XSUB, REQ, REP, DEALER, ROUTER and PAIR, plus a proxy. The API will change before 1.0.
 
 ## Why
 
@@ -74,6 +73,29 @@ Task { for await event in push.events() { print(event) } }   // connected, hands
 try await push.connect("tcp://192.168.0.10:5555")
 ```
 
+Security: PLAIN (user name and password) and CURVE (CurveZMQ: public-key encryption and authentication):
+
+```swift
+// CURVE server: publish serverKeys.publicKey.z85, keep the secret key private.
+let serverKeys = CurveKeyPair.generate()
+var serverOptions = SocketOptions()
+serverOptions.security = .curveServer(keyPair: serverKeys, authenticate: { clientKey in
+    allowedClients.contains(clientKey)     // leave out `authenticate` to accept any client key
+})
+let pull = PullSocket(options: serverOptions)
+
+// CURVE client: knows the server's public key and has its own key pair.
+var clientOptions = SocketOptions()
+clientOptions.security = .curveClient(serverKey: try CurvePublicKey(z85: serverPublicKeyText),
+                                      keyPair: CurveKeyPair.generate())
+let push = PushSocket(options: clientOptions)
+
+// PLAIN: .plainServer(accepting: ["admin": "secret"]) and .plainClient(username: "admin", password: "secret")
+```
+
+The CURVE primitives (Salsa20, XSalsa20, Poly1305) are written in Swift and checked against libsodium's output and
+against libzmq; X25519 comes from CryptoKit (swift-crypto on Linux). They have not had an external security audit.
+
 Each socket type has only the operations it supports: `subscribe` exists on `SubSocket`, `RouterSocket.send(_:to:)`
 takes a routing ID, and `ReqSocket.request(_:)` cannot be called out of order. Waiting calls end with
 `CancellationError` when their task is cancelled. Options such as high-water marks, linger, the routing ID, heartbeats,
@@ -84,7 +106,8 @@ takes a routing ID, and `ReqSocket.request(_:)` cannot be called out of order. W
 
 Tested against libzmq 4.3.5 through pyzmq 27.2.0, with the Swift side binding and with it connecting: every pair of
 the stage 1 socket types over TCP; PUSH/PULL and REQ/REP over IPC; XPUB and XSUB with libzmq SUB and XPUB peers; and
-heartbeats both ways, including a libzmq peer that is frozen with `SIGSTOP` and resumed. Handshake bytes are checked
+heartbeats both ways, including a libzmq peer that is frozen with `SIGSTOP` and resumed; PLAIN and CURVE both ways,
+accepted and refused, with encrypted subscriptions and heartbeats over CURVE. Handshake bytes are checked
 against recorded libzmq traffic, including ZMTP 3.0 peers. `inproc://` connects sockets of the same `ZMQContext` only.
 
 ## Performance

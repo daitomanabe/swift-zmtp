@@ -225,7 +225,7 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
   - 揺れた試験が 1 本あった(libzmq の相手からのハートビートで接続が保たれる試験)。原因は試験の側で、相手が送ってすぐ閉じたのを切断と数えていた。
     相手が送ったあとも待つようにして直した。ライブラリの側の時間切れで切れた記録は無かった
 
-### 段階 3:認証と暗号(中〜大)
+### 段階 3:認証と暗号(中〜大)— 済み(2026-10-18)
 
 - PLAIN(24/ZMTP-PLAIN)
 - CURVE(25/ZMTP-CURVE・26/CurveZMQ):XSalsa20・HSalsa20・Poly1305 を Swift で書き、NaCl のテストベクタで確かめる。X25519 は swift-crypto
@@ -233,6 +233,19 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 - 認証の判断(ZAP にあたるもの):許す公開鍵やユーザーを、Swift のクロージャで決める
 - できあがり:pyzmq の CURVE のサーバー・クライアントと両方向で通信できる。違う鍵は拒まれる
 - 外のネットワークで使う前に、暗号の部分だけを別に見直す
+- 結果:設計は `docs/DESIGN.md` の 7 章。実装は Sonnet 5.5 のサブエージェント(暗号の部品と PLAIN は別の作業ツリーで並べて)、確認・暗号の見直し・コミットは Opus 5.5
+  - `ZMTPCrypto`(Swift だけの Salsa20・HSalsa20・XSalsa20・Poly1305・secretbox・box と Z85。X25519 は CryptoKit、Linux は swift-crypto)。
+    libsodium(PyNaCl 1.6.2)で作ったベクタと RFC 8439 の例で確かめ、Poly1305 は別に Python の多倍長計算と 11,471 通り照らし合わせた
+  - PLAIN(`Security.plainClient` / `plainServer`)と CURVE(`Security.curveClient` / `curveServer`、`CurveKeyPair`・Z85)。
+    認証は async のクロージャで決め、断ると ERROR "400"
+  - テスト:ZMTPTests・ZMQTests・ZMTPCryptoTests 91 本、InteropTests 30 本(段階 3 の 12 本:PLAIN と CURVE を両方向で、受け入れと拒否、
+    CURVE の上の購読とハートビート)
+  - libzmq との食い違いを 1 つ見つけた:libzmq 4.3.5 の PLAIN の ERROR の名前は C で `"\x05ERROR"` と書かれていて、`\x05E` が 1 つの 16 進数に
+    読まれるので、線の上では `5E 'RROR'` になる。受けるときはこの形も ERROR として読む。送るのは仕様の形のまま(libzmq の PLAIN クライアントは
+    認証の失敗ではなく形の誤りとして扱うが、どちらでも接続は閉じる)
+  - 暗号の見直し(設計の側):並び・鍵の組み合わせ・nonce の数え方・cookie と vouch の照合・一定時間の比較は仕様どおり。残っていること:
+    鍵をメモリから消していない(Swift で確実に消す方法が無い)、Z85 で秘密鍵を読むときに表を引く(設定のとき 1 回)、Linux の分かれ道を
+    まだビルドしていない、**外部の専門家による監査は受けていない**
 
 ### 段階 4:速さと仕上げ(中)
 

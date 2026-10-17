@@ -4,9 +4,10 @@ ZeroMQ を Swift だけで実装する。ZMTP 3.1 を話し、libzmq・pyzmq と
 C のライブラリ(libzmq・libsodium)は使わない。調査と計画は [PLAN.md](PLAN.md)、設計は [docs/DESIGN.md](docs/DESIGN.md)。
 English: [README.md](README.md)
 
-> **初期の版。** 今は段階 2 まで:`tcp://`・`ipc://`・`inproc://`、NULL(認証なし)、ハートビート、接続の出来事、
+> **初期の版。** 今は段階 3 まで:`tcp://`・`ipc://`・`inproc://`、方式 NULL・PLAIN・CURVE、ハートビート、接続の出来事、
 > ソケットの型 PUSH・PULL・PUB・SUB・XPUB・XSUB・REQ・REP・DEALER・ROUTER・PAIR と proxy。1.0 までに API は変わる。
-> PLAIN・CURVE は段階 3。
+> CURVE の暗号(Salsa20・XSalsa20・Poly1305)は Swift で書き、libsodium と libzmq で確かめた。X25519 は CryptoKit(Linux は swift-crypto)。
+> 外部の専門家による監査は受けていない。
 
 入れ方(まだ版のタグは無い):
 
