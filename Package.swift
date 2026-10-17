@@ -12,6 +12,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
+        // X25519 on Linux only; Apple platforms use CryptoKit (see ZMTPCrypto).
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"6.0.0"),
     ],
     targets: [
         // ZMTP 3.x without any I/O: greeting, handshake, framing, commands, mechanisms.
@@ -20,6 +22,14 @@ let package = Package(
             name: "ZMTP",
             dependencies: [
                 .product(name: "NIOCore", package: "swift-nio"),
+            ]
+        ),
+        // CURVE primitives (Salsa20, XSalsa20-Poly1305, NaCl box, X25519, Z85), no I/O, no NIO.
+        // Not a product: `package` access, for the ZMTP target only.
+        .target(
+            name: "ZMTPCrypto",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
             ]
         ),
         // Public API: socket semantics and the transports, on top of SwiftNIO.
@@ -39,6 +49,11 @@ let package = Package(
         .testTarget(
             name: "InteropTests",
             dependencies: ["ZMQ"]
+        ),
+        .testTarget(
+            name: "ZMTPCryptoTests",
+            dependencies: ["ZMTPCrypto"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "ZMTPTests",
