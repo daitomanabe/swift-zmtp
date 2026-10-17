@@ -8,7 +8,7 @@ import Glibc
 import Musl
 #endif
 
-/// Parsing of `tcp://HOST:PORT` and `ipc://PATH` endpoints.
+/// Parsing of `tcp://HOST:PORT`, `ipc://PATH` and `inproc://NAME` endpoints.
 enum Endpoint {
     struct TCP {
         var host: String
@@ -21,12 +21,15 @@ enum Endpoint {
         case tcp(TCP)
         /// A Unix domain socket path (for `ipc://*`, a fresh one in the temporary directory).
         case ipc(path: String)
+        /// A name in the context's inproc table.
+        case inproc(name: String)
     }
 
     /// Where `connect` goes.
     enum ConnectTarget {
         case tcp(host: String, port: Int)
         case ipc(path: String)
+        case inproc(name: String)
     }
 
     /// The longest path a Unix domain socket address can hold: 103 bytes on macOS, which is also the
@@ -36,7 +39,7 @@ enum Endpoint {
         return min(MemoryLayout.size(ofValue: address.sun_path) - 1, 103)
     }()
 
-    /// `tcp://IPv4:PORT`, `tcp://*:PORT` (PORT is a number or `*`), `ipc://PATH` or `ipc://*`.
+    /// `tcp://IPv4:PORT`, `tcp://*:PORT` (PORT is a number or `*`), `ipc://PATH`, `ipc://*` or `inproc://NAME`.
     static func forBind(_ endpoint: String) throws -> BindTarget {
         let (scheme, address) = try splitScheme(endpoint)
         switch scheme {
@@ -45,12 +48,15 @@ enum Endpoint {
         case "ipc":
             if address == "*" { return .ipc(path: uniqueIPCPath()) }
             return .ipc(path: try ipcPath(endpoint, address))
+        case "inproc":
+            return .inproc(name: try inprocName(endpoint, address))
         default:
-            throw unsupportedOrUnknown(endpoint, scheme)
+            throw unknownTransport(endpoint, scheme)
         }
     }
 
-    /// `tcp://HOST:PORT` with a host name, an IPv4 address or an IPv6 address in brackets, or `ipc://PATH`.
+    /// `tcp://HOST:PORT` with a host name, an IPv4 address or an IPv6 address in brackets, `ipc://PATH` or
+    /// `inproc://NAME`.
     static func forConnect(_ endpoint: String) throws -> ConnectTarget {
         let (scheme, address) = try splitScheme(endpoint)
         switch scheme {
@@ -59,8 +65,10 @@ enum Endpoint {
             return .tcp(host: tcp.host, port: tcp.port)
         case "ipc":
             return .ipc(path: try ipcPath(endpoint, address))
+        case "inproc":
+            return .inproc(name: try inprocName(endpoint, address))
         default:
-            throw unsupportedOrUnknown(endpoint, scheme)
+            throw unknownTransport(endpoint, scheme)
         }
     }
 
@@ -169,6 +177,14 @@ enum Endpoint {
         unlink(path)
     }
 
+    // MARK: - Inproc
+
+    /// The part after `inproc://`: any non-empty text (the name is only a key in the context's table).
+    private static func inprocName(_ endpoint: String, _ address: Substring) throws -> String {
+        guard !address.isEmpty else { throw ZMQError.invalidEndpoint("\(endpoint): empty name") }
+        return String(address)
+    }
+
     // MARK: - Shared
 
     /// Checks the scheme and returns the rest of the endpoint.
@@ -179,9 +195,7 @@ enum Endpoint {
         return (endpoint[..<schemeEnd.lowerBound], endpoint[schemeEnd.upperBound...])
     }
 
-    private static func unsupportedOrUnknown(_ endpoint: String, _ scheme: Substring) -> ZMQError {
-        scheme == "inproc"
-            ? .unsupportedTransport(endpoint)
-            : .invalidEndpoint("\(endpoint): unknown transport \(scheme)")
+    private static func unknownTransport(_ endpoint: String, _ scheme: Substring) -> ZMQError {
+        .invalidEndpoint("\(endpoint): unknown transport \(scheme)")
     }
 }

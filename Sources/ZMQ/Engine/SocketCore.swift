@@ -24,7 +24,9 @@
 //   - `peerSubscribed` / `peerCancelled`: SUBSCRIBE and CANCEL received from the peer (PUB).
 // Transports: a pipe talks to its peer through a `PipeConnection` (PipeConnection.swift). TCP and IPC
 // connections are NIO channels driven by `ConnectionHandler`, which also keeps the handshake timeout and
-// heartbeat clocks. The core reports what happens to connections as `SocketEvent`s (`events`).
+// heartbeat clocks. An inproc link has no channel: `InprocConnection` passes messages to the other
+// socket's event loop, and the core links two sockets through the context's `InprocRegistry`. The core
+// reports what happens to connections as `SocketEvent`s (`events`).
 // The public class of the type creates a `SocketEngine` with its behavior and exposes the typed
 // `send` / `receive` calls on top of `engine.send(frames)` and `engine.receive()`.
 
@@ -83,6 +85,13 @@ final class SocketCore: @unchecked Sendable {
     private var nextPipeID = 0
     private var listeners: [Listener] = []
     private var handlers: [ObjectIdentifier: ConnectionHandler] = [:]
+    // Inproc state (SocketCore+Inproc.swift). Internal so the extension in that file can use it.
+    /// The `inproc://` names of the context; shared with the other sockets of the context.
+    let inproc: InprocRegistry
+    /// Names this socket has bound (the registry holds them for us until `close()`).
+    var inprocNames: [String] = []
+    /// Inproc links that are up or being set up, until they end.
+    var inprocLinks: [ObjectIdentifier: InprocConnection] = [:]
     private var receiveWaiters = CircularBuffer<Waiter<[ByteBuffer]>>()
     private var sendWaiters = CircularBuffer<Waiter<Void>>()
     private var loadBalanceCursor = 0
@@ -92,10 +101,11 @@ final class SocketCore: @unchecked Sendable {
     /// A task waiting in `close()` was cancelled: do not wait for linger.
     private var lingerAborted = false
 
-    init(loop: any EventLoop, options: SocketOptions, behavior: SocketBehavior) {
+    init(loop: any EventLoop, options: SocketOptions, behavior: SocketBehavior, inproc: InprocRegistry) {
         self.loop = loop
         self.options = options
         self.behavior = behavior
+        self.inproc = inproc
         behavior.core = self
     }
 
@@ -190,6 +200,7 @@ final class SocketCore: @unchecked Sendable {
         } catch {
             return loop.makeFailedFuture(error)
         }
+        if case .inproc(let name) = target { return bindInproc(name, endpoint: endpoint) }
 
         let core = self
         let listener = Listener()
@@ -213,6 +224,8 @@ final class SocketCore: @unchecked Sendable {
             // A file left by an earlier run would make bind fail with "address in use".
             Endpoint.removeStaleFile(at: path)
             binding = bootstrap.bind(unixDomainSocketPath: path, cleanupExistingSocketFile: false)
+        case .inproc:
+            preconditionFailure("an inproc name has no channel")
         }
 
         return binding
@@ -233,6 +246,8 @@ final class SocketCore: @unchecked Sendable {
                     listener.endpoint = "tcp://\(host):\(port)"
                 case .ipc(let path):
                     listener.endpoint = "ipc://\(path)"
+                case .inproc:
+                    preconditionFailure("an inproc name has no channel")
                 }
                 self.listeners.append(listener)
                 self.events.emit(.listening(endpoint: listener.endpoint))
@@ -275,6 +290,7 @@ final class SocketCore: @unchecked Sendable {
             phase = .lingering
             failWaiters()
             for listener in listeners { listener.close() }
+            unbindInprocNames()
             if lingerAborted || options.linger.map({ $0 <= .zero }) == true {
                 beginTeardown()
             } else if !hasPendingOutput {
@@ -329,8 +345,9 @@ final class SocketCore: @unchecked Sendable {
         return true
     }
 
-    /// The ZMTP handshake finished. Returns false to have the connection closed.
-    func handshakeCompleted(_ handler: ConnectionHandler, peer: Metadata) -> Bool {
+    /// The handshake finished (ZMTP, or the type check of an inproc link). Returns false to have the
+    /// connection closed.
+    func handshakeCompleted(_ handler: any PipeConnection, peer: Metadata) -> Bool {
         guard phase == .open || phase == .lingering else { return false }
         if let pipe = handler.pipe {
             // Connect side: the pipe has been here since connect().
@@ -376,14 +393,20 @@ final class SocketCore: @unchecked Sendable {
     }
 
     /// The connection ended (or never came up after the TCP connect).
-    func connectionClosed(_ handler: ConnectionHandler) {
+    func connectionClosed(_ handler: any PipeConnection) {
         if handler.isEstablished { events.emit(.disconnected(endpoint: handler.endpoint)) }
+        if let link = handler as? InprocConnection { inprocLinks[ObjectIdentifier(link)] = nil }
         guard let pipe = handler.pipe else { return }
         if pipe.isConnectSide {
             guard case .linked(let current) = pipe.link, current === handler else { return }
             pipe.link = .idle
             if handler.wasAttached { behavior.pipeDetached(pipe) }
-            scheduleReconnect(pipe)
+            if let link = handler as? InprocConnection, link.waitsForBind {
+                // The bound socket went away: wait for the next bind of the name (no timer).
+                connectNow(pipe)
+            } else {
+                scheduleReconnect(pipe)
+            }
         } else {
             terminate(pipe)
         }
@@ -486,6 +509,10 @@ final class SocketCore: @unchecked Sendable {
 
     private func connectNow(_ pipe: Pipe) {
         guard case .connect(let target, let endpoint) = pipe.origin, phase == .open || phase == .lingering else { return }
+        if case .inproc(let name) = target {
+            connectInproc(pipe, name: name, endpoint: endpoint)
+            return
+        }
         pipe.link = .connecting
         let core = self
         let pipeID = pipe.id
@@ -505,6 +532,8 @@ final class SocketCore: @unchecked Sendable {
                 .connect(host: host, port: port)
         case .ipc(let path):
             connecting = bootstrap.connect(unixDomainSocketPath: path)
+        case .inproc:
+            preconditionFailure("an inproc name has no channel")
         }
         connecting
             .assumeIsolated()
@@ -557,10 +586,16 @@ final class SocketCore: @unchecked Sendable {
         failWaiters()
 
         var closing: [EventLoopFuture<Void>] = []
+        unbindInprocNames()
         for pipe in pipes {
             if case .backoff(let timer) = pipe.link { timer.cancel() }
+            if case .waitingForBind = pipe.link, case .connect(.inproc(let name), _) = pipe.origin {
+                inproc.cancelWait(name, core: self, pipeID: pipe.id)
+            }
             pipe.link = .stopped
         }
+        // Inproc links end at once: the other sockets are told, and each link reports `disconnected`.
+        for link in Array(inprocLinks.values) { link.close() }
         for listener in listeners {
             listener.close()
             if let channel = listener.channel { closing.append(channel.closeFuture) }
@@ -588,6 +623,7 @@ final class SocketCore: @unchecked Sendable {
         }
         pipes.removeAll()
         handlers.removeAll()
+        inprocLinks.removeAll()
         events.emit(.closed)
         events.finish()
         let continuations = closeContinuations

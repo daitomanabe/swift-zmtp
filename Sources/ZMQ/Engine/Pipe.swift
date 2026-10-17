@@ -21,6 +21,9 @@ final class Pipe {
         case connecting
         /// A connection exists (its handshake may still be running).
         case linked(any PipeConnection)
+        /// Inproc connect side: nothing is bound to the name; the pipe is in the context's table and
+        /// is told at the next bind.
+        case waitingForBind
         /// Waiting to reconnect.
         case backoff(Scheduled<Void>)
         /// The socket is closing; no more attempts.

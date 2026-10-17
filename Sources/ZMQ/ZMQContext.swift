@@ -8,6 +8,8 @@ public final class ZMQContext: Sendable {
     public static let `default` = ZMQContext()
 
     let eventLoopGroup: any EventLoopGroup
+    /// The `inproc://` names of this context: sockets of other contexts cannot reach them.
+    let inproc = InprocRegistry()
 
     /// A context on the shared NIO event loop group.
     public init() {

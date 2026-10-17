@@ -2,7 +2,8 @@
 public enum ZMQError: Error, Sendable, Equatable {
     /// The endpoint string is malformed.
     case invalidEndpoint(String)
-    /// The transport is not available yet (`inproc://`).
+    /// The transport is not available. Reserved: every transport the library knows (`tcp://`, `ipc://`,
+    /// `inproc://`) works, so nothing throws this now.
     case unsupportedTransport(String)
     case bindFailed(endpoint: String, reason: String)
     /// The socket was closed.

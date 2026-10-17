@@ -12,6 +12,17 @@ protocol PipeConnection: AnyObject {
     var isAttached: Bool { get }
     /// Address for events: the string given to `connect`, or the bound endpoint that accepted the peer.
     var endpoint: String { get }
+    /// The pipe this connection serves; set by `attach` (right away for a connect side, after the
+    /// handshake for a bind side).
+    var pipe: Pipe? { get }
+    /// The core took this connection and reports its end (`disconnected` follows).
+    var isEstablished: Bool { get }
+    /// The socket accepted this connection after the handshake (stays true after the connection ends).
+    var wasAttached: Bool { get }
+
+    func attach(_ pipe: Pipe)
+    /// The socket accepted the connection: from now on `isAttached` holds while it is up.
+    func markAttached()
 
     /// Hands `messages` to the connection, in order. `completed` runs once on the socket's loop when
     /// they have left (TCP and IPC: the write finished or failed; in-process: the peer took them and has

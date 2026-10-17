@@ -8,7 +8,8 @@ final class SocketEngine: Sendable {
     var options: SocketOptions { core.options }
 
     init(context: ZMQContext, options: SocketOptions, behavior: SocketBehavior) {
-        core = SocketCore(loop: context.eventLoopGroup.next(), options: options, behavior: behavior)
+        core = SocketCore(
+            loop: context.eventLoopGroup.next(), options: options, behavior: behavior, inproc: context.inproc)
     }
 
     /// The socket was released without `close()`: close it right away, without waiting for linger.
