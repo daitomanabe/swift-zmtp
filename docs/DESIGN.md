@@ -158,7 +158,8 @@ public enum ZMTPError: Error, Sendable, Equatable {
 7. 1 回の `receive` で出る `Output` は、起きた順に並べる(例:`[.write(READY), .ready, .message]`)
 
 段階 3 への備え:方式は内部の enum にし、`encodeMessage` と受けたデータフレームが方式を通る形にしておく(CURVE が暗号化を差し込めるように)。
-NULL では何もしない。
+NULL では何もしない。実装済み(`Sources/ZMTP/Mechanism.swift`):握手のあとのフレームはコマンドも含めてすべて `Mechanism.encode` / `decode` を通る。
+CURVE は送るたびに nonce を数えるので、段階 3 で `encodeMessage`・`encodeSubscribe`・`encodeCancel` を `mutating` にする。
 
 ### 1.6 ZMTP のテスト(`Tests/ZMTPTests`、固定データを使う)
 
@@ -169,7 +170,7 @@ NULL では何もしない。
 4. null-pub-sub の `clientToServer` を PUB の接続に流す → `.subscribe("w")`、`.cancel("w")`
 5. zmtp30-sub の `clientToServer` を PUB の接続に流す → `.subscribe("w")`、`.cancel("w")`(0x01 / 0x00 の形)
 6. `encodeSubscribe("w")`:zmtp30-sub の `serverToClient`(下位 0)を流した SUB では `00 02 01 77`、null-pub-sub の `serverToClient`(下位 1)を
-   流した SUB では `04 0a 09 'SUBSCRIBE' 77`
+   流した SUB では `04 0b 09 'SUBSCRIBE' 77`
 7. null-heartbeat の `clientToServer` を PULL の接続に流す → `.message(["hello"])` と、PONG のフレーム `04 05 04 'PONG'` の `.write`
 8. 誤り 1 つずつ:先頭が 0x00 → `badSignature`。方式が PLAIN → `mechanismMismatch`。PUSH の設定に PUSH の READY → ERROR を書いて `incompatibleSocketType`
 

@@ -11,6 +11,18 @@ struct Fixture: Decodable, CustomTestStringConvertible {
 
     var testDescription: String { name }
 
+    /// Everything the connecting side sent (greeting, handshake, messages).
+    var clientStream: [UInt8] { bytes(hex: clientToServer) }
+    /// Everything the binding side sent.
+    var serverStream: [UInt8] { bytes(hex: serverToClient) }
+
+    static func named(_ name: String) throws -> Fixture {
+        guard let fixture = try all().first(where: { $0.name == name }) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return fixture
+    }
+
     static func all() throws -> [Fixture] {
         guard let directory = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
             throw CocoaError(.fileNoSuchFile)
