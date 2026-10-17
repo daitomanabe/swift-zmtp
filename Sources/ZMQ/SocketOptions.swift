@@ -30,5 +30,33 @@ public struct SocketOptions: Sendable {
     /// A connecting socket then tries again. nil: no limit.
     public var handshakeTimeout: Duration? = .seconds(30)
 
+    /// ROUTER only (libzmq: `ZMQ_ROUTER_MANDATORY`). Makes `send(_:to:)` report what it would otherwise
+    /// hide: a routing ID that no connected peer has throws `ZMQError.hostUnreachable`, and a peer that
+    /// is at its send high-water mark makes the call wait (it ends with `CancellationError` when the
+    /// task is cancelled) instead of dropping the message. Sends are served in order, so one send
+    /// that waits holds up the ones behind it. false (the default): both cases drop the message silently.
+    public var routerMandatory = false
+
+    /// PUSH, PULL, PUB, SUB and DEALER sockets; ignored by the other types (libzmq: `ZMQ_CONFLATE`).
+    /// Each peer's send queue and each peer's receive queue keeps only the newest message, so a slow
+    /// peer or reader sees the latest value rather than a backlog. The high-water marks are not used
+    /// then. Messages already handed to the connection are not taken back. Unlike libzmq, a multipart
+    /// message is kept whole.
+    public var conflate = false
+
+    /// Connecting sockets (libzmq: `ZMQ_IMMEDIATE`). A connection made with `connect` is a target for
+    /// sends only once its handshake is done. Load balancing (PUSH, DEALER, REQ) then skips peers that
+    /// are not there yet, and `send` waits while none is ready, instead of queueing for a peer that may
+    /// never come. When the connection ends, what was queued for it is dropped; it is not kept for the
+    /// reconnect. false (the default): messages queue from the `connect` call on and survive reconnects.
+    public var immediate = false
+
+    /// TCP connections only (libzmq: `ZMQ_TCP_KEEPALIVE` with `ZMQ_TCP_KEEPALIVE_IDLE`); IPC and inproc
+    /// ignore it. Turns on TCP keepalive and starts the probes after the connection has been idle for this
+    /// long, in whole seconds and at least 1 (macOS `TCP_KEEPALIVE`, Linux `TCP_KEEPIDLE`). The interval
+    /// and the number of probes stay at the system's defaults. Applies to connections made and accepted
+    /// by this socket. nil (the default): the system's setting.
+    public var tcpKeepAlive: Duration? = nil
+
     public init() {}
 }

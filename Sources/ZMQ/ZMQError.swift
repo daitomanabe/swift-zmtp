@@ -10,4 +10,7 @@ public enum ZMQError: Error, Sendable, Equatable {
     case socketClosed
     /// The operation does not fit the state of the socket, for example a REP reply without a request.
     case invalidState(String)
+    /// A ROUTER socket with `options.routerMandatory` was asked to send to a routing ID that no connected
+    /// peer has.
+    case hostUnreachable(RoutingID)
 }

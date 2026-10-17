@@ -34,6 +34,11 @@ public final class RouterSocket: ZMQSocket {
 
     /// Sends `message` to the peer with `routingID`. A routing ID nobody has, or a peer at its send
     /// high-water mark, drops the message silently; this call never waits and does not throw for it.
+    ///
+    /// With `options.routerMandatory` it reports instead: an unknown routing ID throws
+    /// `ZMQError.hostUnreachable`, and a peer at its send high-water mark makes the call wait until it
+    /// has room (cancelling the task ends the wait with `CancellationError` and sends nothing). Calls are
+    /// served in order, so a send that waits holds up the ones behind it, also those for other peers.
     public func send(_ message: Message, to routingID: RoutingID) async throws {
         try await engine.send([routingID.frame.buffer] + message.wireFrames())
     }
@@ -86,9 +91,16 @@ final class RouterBehavior: SocketBehavior {
         return id
     }
 
-    /// `frames[0]` is the routing ID, the rest is the message. Unknown ID or full pipe: dropped.
+    /// `frames[0]` is the routing ID, the rest is the message. Unknown ID or full pipe: dropped, or with
+    /// `routerMandatory` an error for an unknown ID and a wait for a full pipe.
     override func trySend(_ frames: [ByteBuffer]) throws -> SendOutcome {
-        guard frames.count >= 2, let pipe = pipesByID[frames[0]], pipe.canAccept else { return .accepted }
+        guard frames.count >= 2 else { return .accepted }
+        let mandatory = core.options.routerMandatory
+        guard let pipe = pipesByID[frames[0]] else {
+            if mandatory { throw ZMQError.hostUnreachable(RoutingID(Frame(buffer: frames[0]))) }
+            return .accepted
+        }
+        guard pipe.canAccept else { return mandatory ? .wouldBlock : .accepted }
         pipe.enqueue(Array(frames.dropFirst()))
         return .accepted
     }

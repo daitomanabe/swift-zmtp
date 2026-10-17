@@ -80,17 +80,27 @@ final class Pipe {
     /// Messages that count against `sendHighWaterMark`.
     var pending: Int { outbound.count + writing }
 
-    /// True when `enqueue` is within the send high-water mark.
-    var canAccept: Bool { !isTerminated && pending < core.sendLimit }
+    /// True when `enqueue` is within the send high-water mark. A conflating socket has no limit (a new
+    /// message replaces the one waiting). With `immediate`, a connect-side pipe takes messages only
+    /// while its connection has finished the handshake.
+    var canAccept: Bool {
+        guard !isTerminated else { return false }
+        if core.options.immediate, isConnectSide, connection?.isAttached != true { return false }
+        return core.conflates || pending < core.sendLimit
+    }
 
-    var hasInboundRoom: Bool { inbound.count < core.receiveLimit }
+    /// True while the received-message queue may take more (a conflating socket keeps one message only
+    /// and always has room).
+    var hasInboundRoom: Bool { core.conflates || inbound.count < core.receiveLimit }
 
     // MARK: Sending
 
     /// Queues one message for this peer. Writes are batched: the actual write and flush happen once, at
     /// the end of the current event-loop tick, for everything queued by then. Check `canAccept` first
-    /// if the type must respect the high-water mark.
+    /// if the type must respect the high-water mark. A conflating socket keeps only the newest message
+    /// in the queue: it replaces what is still waiting.
     func enqueue(_ frames: [ByteBuffer]) {
+        if core.conflates { outbound.removeAll(keepingCapacity: true) }
         outbound.append(frames)
         scheduleFlush()
     }
@@ -103,9 +113,12 @@ final class Pipe {
         connection?.writeSubscription(topic, subscribe: subscribe)
     }
 
-    /// Arranges for `flushNow` to run once at the end of this tick (if a connection is up).
+    /// Arranges for `flushNow` to run once at the end of this tick (if a connection is up). A conflating
+    /// socket hands over one batch at a time: while the connection still holds a write, newer messages
+    /// replace each other in the queue, and the write's completion flushes what is left.
     func scheduleFlush() {
         guard !flushScheduled, !outbound.isEmpty, let connection, connection.isAttached else { return }
+        guard !(core.conflates && writing > 0) else { return }
         flushScheduled = true
         core.loop.assumeIsolated().execute { [self] in
             flushScheduled = false
@@ -140,6 +153,7 @@ final class Pipe {
         connection.write(messages) { [self] in
             // A failed write means the connection broke; those messages are lost, as in libzmq.
             writing -= count
+            if core.conflates { scheduleFlush() }
             core.pipeWriteCompleted(self)
         }
     }

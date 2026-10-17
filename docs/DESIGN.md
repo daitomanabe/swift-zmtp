@@ -495,3 +495,7 @@ API は足さない。`withThrowingTaskGroup` でソケットごとに `messages
   受けの列に空きができたとき、止めていた「済んだ」をまとめて返すので、受けの列は送り手の HWM の分だけ超えることがある
 - XPUB の知らせ(`subscribe` / `unsubscribe`)は、受けの HWM に数えない別の列に入り、上流からのデータより先に読まれる
 - proxy は `ZMQProxy.run(frontend:backend:)`(XSUB↔XPUB、ROUTER↔DEALER、PULL→PUSH)。公開 API だけで作ってある
+- オプション:知らない routing ID は `ZMQError.hostUnreachable(RoutingID)`。`routerMandatory` の待ちは送りの順番どおりなので、
+  満ちた相手への 1 通が、ほかの相手への送りも待たせる(libzmq の待つ送りと同じ)。`conflate` はメッセージを丸ごと(複数フレームでも)残す
+  (libzmq は 1 フレームだけ)。conflate の pipe は接続に 1 回ずつ書き、書き終わったら最新のものを書く(遅い TCP の相手で NIO の書き込みバッファが
+  伸びないように)。`tcpKeepAlive` は何もない時間だけを決め、確かめの間隔と回数は OS の既定のまま

@@ -78,6 +78,10 @@ final class SocketCore: @unchecked Sendable {
     let loop: any EventLoop
     let options: SocketOptions
     let behavior: SocketBehavior
+    /// `options.conflate` is set and the socket type honors it (PUSH, PULL, PUB, SUB, DEALER): every
+    /// pipe keeps only the newest message in its send queue and in its receive queue, without a
+    /// high-water mark.
+    let conflates: Bool
     /// Where `SocketEvent`s go; `events()` of the public sockets makes streams from it.
     let events = SocketEventHub()
 
@@ -110,6 +114,10 @@ final class SocketCore: @unchecked Sendable {
         self.options = options
         self.behavior = behavior
         self.inproc = inproc
+        switch behavior.socketType {
+        case .push, .pull, .pub, .sub, .dealer: self.conflates = options.conflate
+        case .pair, .req, .rep, .router, .xpub, .xsub: self.conflates = false
+        }
         behavior.core = self
     }
 
@@ -236,10 +244,17 @@ final class SocketCore: @unchecked Sendable {
         let binding: EventLoopFuture<any Channel>
         switch target {
         case .tcp(let address):
-            binding = bootstrap
+            var tcp =
+                bootstrap
                 .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .childChannelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
-                .bind(host: address.host, port: address.port)
+            if let idle = options.tcpKeepAliveIdleSeconds {
+                tcp =
+                    tcp
+                    .childChannelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
+                    .childChannelOption(ChannelOptions.tcpOption(.tcpKeepAliveIdle), value: idle)
+            }
+            binding = tcp.bind(host: address.host, port: address.port)
         case .ipc(let path):
             // A file left by an earlier run would make bind fail with "address in use".
             Endpoint.removeStaleFile(at: path)
@@ -408,6 +423,8 @@ final class SocketCore: @unchecked Sendable {
             behavior.delivered(message, from: pipe)
             waiter.succeed(message.frames)
         } else {
+            // A conflating socket keeps the newest message only.
+            if conflates { pipe.inbound.removeAll(keepingCapacity: true) }
             pipe.inbound.append(message)
         }
     }
@@ -420,7 +437,13 @@ final class SocketCore: @unchecked Sendable {
         if pipe.isConnectSide {
             guard case .linked(let current) = pipe.link, current === handler else { return }
             pipe.link = .idle
-            if handler.wasAttached { behavior.pipeDetached(pipe) }
+            // `immediate`: what was queued for this connection is not kept for the next one.
+            if options.immediate { pipe.outbound.removeAll() }
+            if handler.wasAttached {
+                behavior.pipeDetached(pipe)
+                // A parked send may be aimed at the peer that just went (ROUTER with `routerMandatory`).
+                retrySendWaiters()
+            }
             if let link = handler as? InprocConnection, link.waitsForBind {
                 // The bound socket went away: wait for the next bind of the name (no timer).
                 connectNow(pipe)
@@ -548,9 +571,14 @@ final class SocketCore: @unchecked Sendable {
         let connecting: EventLoopFuture<any Channel>
         switch target {
         case .tcp(let host, let port):
-            connecting = bootstrap
-                .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
-                .connect(host: host, port: port)
+            var tcp = bootstrap.channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
+            if let idle = options.tcpKeepAliveIdleSeconds {
+                tcp =
+                    tcp
+                    .channelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
+                    .channelOption(ChannelOptions.tcpOption(.tcpKeepAliveIdle), value: idle)
+            }
+            connecting = tcp.connect(host: host, port: port)
         case .ipc(let path):
             connecting = bootstrap.connect(unixDomainSocketPath: path)
         case .inproc:
