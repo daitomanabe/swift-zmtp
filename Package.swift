@@ -15,7 +15,13 @@ let package = Package(
     ],
     targets: [
         // ZMTP 3.x without any I/O: greeting, handshake, framing, commands, mechanisms.
-        .target(name: "ZMTP"),
+        // NIOCore only for ByteBuffer, so frame bodies are slices, not copies.
+        .target(
+            name: "ZMTP",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+            ]
+        ),
         // Public API: socket semantics and the transports, on top of SwiftNIO.
         .target(
             name: "ZMQ",

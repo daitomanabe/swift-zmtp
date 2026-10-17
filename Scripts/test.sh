@@ -12,7 +12,10 @@ if [ "$(uname)" = "Darwin" ]; then
   case "$dev" in
     */CommandLineTools)
       d="$dev/Library/Developer"
+      # A separate build directory, so plain `swift build` does not rebuild
+      # everything after a test run (and the other way round).
       args=(
+        --scratch-path .build/clt-test
         -Xswiftc -F -Xswiftc "$d/Frameworks"
         -Xlinker -F -Xlinker "$d/Frameworks"
         -Xlinker -rpath -Xlinker "$d/Frameworks"
