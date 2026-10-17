@@ -569,3 +569,107 @@ libzmq はアプリのスレッドと I/O スレッドを pipe でつなぎ、�
 - XPUB の知らせは受けの列にデータと順番どおりに入る(これまではデータより先に読まれた)
 - `trySend` を呼ぶ処理が入れ子にならないよう印を持ち、書き込みの失敗の中で起きた `retrySendWaiters` は別の処理に回す
 
+
+## 7. 段階 3:PLAIN と CURVE(2026-10-18)
+
+仕様は rfc.zeromq.org の 24/ZMTP-PLAIN、25/ZMTP-CURVE、26/CurveZMQ、27/ZAP、32/Z85。細部は libzmq 4.3.5 のソース
+(`curve_server.cpp`・`curve_mechanism_base.cpp`・`plain_server.cpp`・`zap_client.cpp`)と、PLAN.md 2.5 の記録で確かめた。
+
+### 7.1 公開する API
+
+```swift
+public struct PlainCredentials: Sendable, Hashable { public var username: String; public var password: String }
+
+public struct CurvePublicKey: Sendable, Hashable { public init(z85: String) throws; public init(bytes: [UInt8]) throws; public var z85: String; public var bytes: [UInt8] }
+public struct CurveSecretKey: Sendable { public init(z85: String) throws; public init(bytes: [UInt8]) throws; public var z85: String }
+public struct CurveKeyPair: Sendable {
+    public var publicKey: CurvePublicKey; public var secretKey: CurveSecretKey
+    public static func generate() -> CurveKeyPair
+    public init(secretKey: CurveSecretKey)          // derives the public key
+}
+
+public enum Security: Sendable {
+    case none                                                     // NULL
+    case plainClient(username: String, password: String)
+    case plainServer(authenticate: @Sendable (PlainCredentials) async -> Bool)
+    case curveClient(serverKey: CurvePublicKey, keyPair: CurveKeyPair)
+    case curveServer(keyPair: CurveKeyPair, authenticate: (@Sendable (CurvePublicKey) async -> Bool)? = nil)
+    public static func plainServer(accepting accounts: [String: String]) -> Security
+}
+```
+
+- `SocketOptions.security: Security = .none`。鍵の文字列は Z85(40 文字)。鍵の大きさや Z85 の誤りは `ZMQError.invalidKey(String)` を足して投げる
+- PLAIN のサーバーは認証の関数が必須(libzmq も ZAP の係がいないと PLAIN を受けない)。CURVE のサーバーは省略でき、省略すれば
+  どのクライアント鍵も受ける(libzmq の既定と同じ)
+- 認証の関数は async。断ったら ERROR(理由 `"400"`、libzmq の ZAP と同じ)を送って閉じる。待つ時間は `handshakeTimeout` に含まれる
+- inproc には効かない(libzmq と同じく、inproc は方式を使わない)。`handshakeFailed` の理由に、方式の誤り・認証の拒否・暗号の誤りを書く
+
+### 7.2 暗号の部品(新しいターゲット `ZMTPCrypto`、Swift だけ)
+
+- Salsa20 の芯(20 ラウンド)、HSalsa20、XSalsa20、Poly1305、NaCl の `crypto_secretbox`(XSalsa20-Poly1305)、
+  `crypto_box_beforenm`(X25519 の結果に HSalsa20)と、それを使う box / box_open
+- 箱の形は libsodium の "easy" と同じ「MAC 16 バイト + 暗号文」(CurveZMQ の Box の形。NaCl の前に 0 を詰める形ではない)
+- X25519 だけは自分で書かない:Apple では CryptoKit(`Curve25519.KeyAgreement`、共有の秘密の生のバイト)、Linux では swift-crypto
+  (`.product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux]))`)。`#if canImport(CryptoKit)` で切り替える
+- 乱数は `SystemRandomNumberGenerator`(Apple は arc4random、Linux は getrandom で、どちらも暗号に使える)
+- MAC の比べ方は一定時間(早く抜けない)。秘密の値で分かれる分岐や表引きをしない
+- Z85(32/Z85):4 バイト → 5 文字、長さが 4 / 5 の倍数でなければ誤り
+- テストのベクタ:`Tools/crypto/make_vectors.py`(`uv run`、PyNaCl 1.6.2 = libsodium)で作り、`Tests/ZMTPCryptoTests/Fixtures/vectors.json` に置く
+  (secretbox・box_beforenm・box・scalarmult)。Poly1305 は RFC 8439 2.5.2 の例、Z85 は 32/Z85 の例(`86 4F D2 6F B5 59 F7 5B` → `HelloWorld`)
+
+### 7.3 PLAIN(24/ZMTP-PLAIN)
+
+| コマンド | 送る側 | 本体(名前のあと) |
+|---|---|---|
+| HELLO | クライアント | ユーザー名の長さ 1 バイト + ユーザー名、パスワードの長さ 1 バイト + パスワード |
+| WELCOME | サーバー | なし |
+| INITIATE | クライアント | メタデータ(Socket-Type、Identity) |
+| READY | サーバー | メタデータ |
+| ERROR | サーバー | 理由(断ったときは `"400"`) |
+
+- 挨拶の方式は "PLAIN"、as-server は 0(libzmq と同じ。相手の as-server は見ない。どちらがサーバーかは自分の設定で決まる)
+- サーバー:HELLO → 認証(`Output` で外に頼み、結果を入力で受ける)→ WELCOME か ERROR。INITIATE → READY で握手済み
+- クライアント:HELLO → WELCOME を待つ → INITIATE → READY で握手済み。ERROR なら `peerError`
+- ユーザー名とパスワードは 255 バイトまで(長すぎれば `invalidKey` ではなく設定の誤りとして `invalidState`)
+- 固定データ:plain-push-pull で、admin / secret のクライアントが書くバイト列が libzmq と同じ
+
+### 7.4 CURVE(25/ZMTP-CURVE、26/CurveZMQ)
+
+鍵の名前:C・c = クライアントの長く使う公開鍵・秘密鍵、C'・c' = クライアントの使い捨ての鍵、S・s・S'・s' = サーバーの同じもの。
+Box[X](A→B) = A の秘密鍵と B の公開鍵で作る箱(MAC 16 + 暗号文)。
+
+| コマンド | 本体(名前のあと)と大きさ |
+|---|---|
+| HELLO | 版 `01 00`(2)、0 の詰め物(72)、C'(32)、短い nonce(8)、Box[64 個の 0](C'→S)(80) |
+| WELCOME | 長い nonce(16)、Box[S'(32) + cookie(96)](S→C')(144) |
+| cookie | 長い nonce(16)、secretbox[C'(32) + s'(32)](cookie 鍵)(80) |
+| INITIATE | cookie(96)、短い nonce(8)、Box[C(32) + vouch(96) + メタデータ](C'→S') |
+| vouch | 長い nonce(16)、Box[C'(32) + S(32)](C→S')(80) |
+| READY | 短い nonce(8)、Box[メタデータ](S'→C') |
+| MESSAGE | 短い nonce(8)、Box[印(1) + 中身](送り手の ' → 受け手の ') |
+| ERROR | 理由の長さ 1 バイト + 理由(暗号化しない) |
+
+- 24 バイトの nonce = 頭の文字列 + nonce:`"CurveZMQHELLO---"`+8、`"WELCOME-"`+16、`"COOKIE--"`+16、`"CurveZMQINITIATE"`+8、
+  `"VOUCH---"`+16、`"CurveZMQREADY---"`+8、`"CurveZMQMESSAGEC"`+8(クライアントから)、`"CurveZMQMESSAGES"`+8(サーバーから)
+- 短い nonce は 64 ビットのビッグエンディアンの数。**送る側は 1 から始め、短い nonce を使うコマンドごとに 1 増やす**
+  (クライアント:HELLO = 1、INITIATE = 2、MESSAGE は 3 から。サーバー:READY = 1、MESSAGE は 2 から)。
+  **受ける側は、前に受けた値より大きくなければ切る**(HELLO の値を最初の値とする。libzmq と同じ)。使い切ったら切る
+- 長い nonce と cookie 鍵は乱数。サーバーは接続ごとに使い捨ての鍵 S'/s' と cookie 鍵を作り、INITIATE を確かめたら cookie 鍵を消す
+- サーバーが確かめること:HELLO の箱が開いて 64 個の 0、cookie が開いて C' と s' が自分のもの、INITIATE の箱が開く、vouch が開いて
+  **C' と S の両方**が合う(libzmq は C' だけを見ているが、正しいクライアントは両方を入れてくる)。そのあと C を認証の関数に渡す
+- クライアントが確かめること:WELCOME の箱が開く(S が正しい証)、READY の箱が開く
+- **握手のあとは、データもコマンドもすべて MESSAGE に入れる**。MESSAGE は**外側の印を立てない普通のフレーム**で送る
+  (libzmq と同じ。PLAN.md 2.5)。中の印:bit 0 = MORE、bit 1 = COMMAND(SUBSCRIBE・CANCEL・PING・PONG を暗号化して運ぶ)。
+  複数フレームのメッセージは、フレームごとに 1 つの MESSAGE。受けるときは外側の印を見ず、中の印で組み立てる(外側に COMMAND が立っていても受ける)
+- 暗号の誤り(箱が開かない・nonce が戻った・大きさが違う)は ERROR を送らずに閉じる(libzmq と同じ)。認証で断ったときだけ ERROR `"400"`
+- 方式の状態は `Mechanism` の中に持つ。`encodeMessage`・`encodeSubscribe`・`encodeCancel`・`encodePing` は `mutating` になる
+- 握手の前に共有の鍵(`crypto_box_beforenm`)を 1 回だけ計算し、MESSAGE ごとには X25519 をしない
+- 固定データ:curve-push-pull の HELLO の箱が、記録した鍵(server secret)と HELLO の C' で開き、64 個の 0 になる
+
+### 7.5 作業の分け方
+
+1. 暗号の部品(7.2)— ほかと重ならないので、別の作業ツリーで並べて進める
+2. PLAIN と、方式を設定から接続へ通す仕組み(7.1 の `Security`、認証を外に頼む `Output`、`ConnectionHandler` の Task、出来事)
+3. CURVE(7.4)— 1 と 2 のあと
+4. 暗号の部分を設計の側(Opus)が読んで見直す
+5. pyzmq との通信のテスト:PLAIN と CURVE を両方向で、受け入れる場合と断る場合(違うパスワード、違うサーバー鍵、許していないクライアント鍵)
