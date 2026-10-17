@@ -322,6 +322,17 @@ public struct MessageSequence<Element: Sendable>: AsyncSequence, Sendable { … 
 型ごとに 1 本(送って届く)に加えて、振る舞いを 1 本ずつ:bind より先の connect でたまったものが届く、相手が止まってまた bind されたらつなぎ直して届く、
 HWM で PUSH が待つ、PUB が満ちた pipe に捨てる、REQ の取り消しのあと次の request が正しい返事を受ける、受信の取り消し。
 
+### 2.6 実装で決めたこと(エンジン、2026-10-17)
+
+- 型の差し替えは `SocketBehavior` の派生クラス(`Sources/ZMQ/Engine/SocketBehavior.swift`、使い方は `SocketCore.swift` の先頭)
+- 取り消しの順番の問題は「取り消し済みの ID の記録」ではなく、`Waiter` が自分の状態(未登録・待ち・取り消し済み・済み)を持って解く
+  (済んだあとの取り消しで記録が残り続けないように)
+- PAIR の 2 回目の `connect()` は `invalidState` を投げる(libzmq は黙って無視する)。bind の側の 2 つ目の接続は閉じる
+- `close()` を待っている Task が取り消されたら、linger を待たずに閉じる(`linger = nil` でも取り消しで抜けられる)
+- HWM が 0 以下なら上限なし。受けの HWM は、1 回の読み込みに入っていた分だけ超えることがある
+- 空の `Message`(フレーム 0 個)の送信は `invalidState`
+- bind の側の pipe は、接続が切れても受け取り済みのメッセージが読まれるまでは残る(送ってすぐ閉じた相手のメッセージを失わない)
+
 ## 3. pyzmq との通信のテスト(`Tests/InteropTests`)
 
 - `ZMQ_INTEROP=1` のときだけ走る(Swift Testing の `.enabled(if:)`)。相手は `uv run Tools/interop/peer.py …` を `Process` で起こし、

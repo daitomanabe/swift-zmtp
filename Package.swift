@@ -32,6 +32,10 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "ZMQTests",
+            dependencies: ["ZMQ"]
+        ),
+        .testTarget(
             name: "ZMTPTests",
             dependencies: ["ZMTP"],
             resources: [.copy("Fixtures")]
