@@ -156,7 +156,7 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 | 案 | 良い点 | 弱い点 |
 |---|---|---|
 | **SwiftNIO(推奨)** | macOS と Linux で同じコード。iOS は NIOTransportServices(Network.framework の上)で動く。成熟している。ByteBuffer、背圧の仕組み、NIOAsyncChannel で async につなげる | 依存が増える(swift-nio・swift-atomics・swift-collections) |
-| Network.framework | 依存が無い。Apple が勧める道 | Apple だけで、Linux では動かない。NWConnection の送信の待ちが際限なく伸びる落とし穴(swift-realtime-audio-osc スキルにある実際のクラッシュ)を自分で防ぐ必要がある |
+| Network.framework | 依存が無い。Apple が勧める道 | Apple だけで、Linux では動かない。NWConnection の送信の待ちが際限なく伸びる落とし穴(実際のアプリでクラッシュした例がある)を自分で防ぐ必要がある |
 | POSIX のソケットと kqueue / epoll を自作 | 依存が無い。いちばん細かく制御できる | 書く量がいちばん多い。OS ごとの違いを自分で持つ |
 
 核を sans-I/O にしておくので、I/O の土台はあとから足せる(たとえば最初は SwiftNIO、iOS 向けに Network.framework 版をあとで)。
@@ -258,14 +258,14 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 
 ## 7. 決めてほしいこと
 
-1〜3 は 2026-10-17 に推奨案で決まった。
+1〜5 は 2026-10-17 に決まった(どれも推奨案)。
 
 1. **方式**:Swift だけで作る — 決定
 2. **I/O の土台**:SwiftNIO — 決定
 3. **対応する OS の下限**:macOS 15・iOS 18・Linux(Swift 6)— 決定
-4. **ライセンスと公開**(未定。決まるまではリモートなしで進める):まず非公開(GitHub の非公開リポジトリか、リモートなし)で始め、公開するときに MIT か MPL-2.0 を選ぶ。
-   libzmq のコードを写さず、仕様から書くので、libzmq の MPL-2.0 には縛られない
-5. **名前**:案はパッケージ `swift-zmtp`、モジュール `ZMQ`(Swift で `zmtp` の名前は使われていない)。今はこの仮の名前で進めている
+4. **ライセンスと公開**:オープンソース。MIT。GitHub の公開リポジトリ `daitomanabe/swift-zmtp` — 決定。
+   libzmq のコードを写さず仕様から書いているので、libzmq の MPL-2.0 には縛られない。README は英語(`README.md`)と日本語(`README.ja.md`)
+5. **名前**:パッケージ `swift-zmtp`、モジュール `ZMQ` — 決定
 6. **最初に使う場面**(未定):どのアプリとどのアプリをつなぐか(たとえば Mac の Swift アプリと、Linux の Python の推論サーバー)。
    段階 1 で先に作るソケットの型の順番をこれで決める
 
