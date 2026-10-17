@@ -174,7 +174,7 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 - 結果:パッケージ `swift-zmtp`(ターゲット `ZMTP`・`ZMQ`、SwiftNIO 2.104)、`Scripts/test.sh`、`Tools/interop/peer.py`
   (pyzmq 27.2.0 に固定)、`Tools/interop/record_fixtures.py`、固定データ 9 件。分かったことは 2.5
 
-### 段階 1:最小で使える版(大)
+### 段階 1:最小で使える版(大)— 済み(2026-10-17)
 
 - ZMTP 3.1 の核:挨拶(64 バイト)、版の取り決め(3.0 の相手にも合わせる)、NULL、READY のメタデータ(Socket-Type・Identity)、
   ソケットの型の組み合わせの検査、短いフレームと長いフレーム、MORE、ERROR
@@ -183,6 +183,25 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 - HWM(送りと受け)。HWM に達したときの型ごとの振る舞い(PUB と ROUTER は捨てる、PUSH・DEALER・REQ は待つ)。linger
 - できあがり:上の型すべてで、Swift と pyzmq のあいだを両方向(Swift が bind する場合・Swift が connect する場合)にメッセージが届く。
   ベンチを 1 回測り、libzmq との差を記録する
+- 結果:設計は `docs/DESIGN.md`。実装は Sonnet 5.5 のサブエージェント、確認とコミットは Opus 5.5
+  - `Sources/ZMTP`(I/O を持たない核)、`Sources/ZMQ`(EventLoop 1 つにソケット 1 つを置くエンジンと 9 つの型)
+  - テスト:ZMTPTests 12 本(libzmq のバイト列と一致)、ZMQTests 17 本(Swift 同士)、InteropTests 11 本・20 ケース
+    (pyzmq 27.2.0 / libzmq 4.3.5 と両方向、`ZMQ_INTEROP=1` のときだけ)。libzmq との食い違いは見つからなかった
+  - 再接続の間隔の既定は libzmq と同じく一定(100 ms)。伸ばすときは `reconnectIntervalMax` を決める
+- ベンチ(`Benchmarks/`、1 回ずつ。Apple M5 Max、18 コア。ほかの処理が動いていたので目安。同じ設定の再計測で 15 % ほど揺れた):
+
+  | 試験 | Swift | libzmq 4.3.5 |
+  |---|---|---|
+  | スループット 16 B × 200,000 | 86,557 通/秒(1.4 MB/s) | 6,711,338 通/秒(107 MB/s) |
+  | スループット 1 KB × 20,000 | 84,358 通/秒(86 MB/s) | 863,154 通/秒(884 MB/s) |
+  | REQ/REP の往復 16 B × 10,000 | 平均 44 µs・p50 41 µs・p99 99 µs | 平均 61 µs・p50 58 µs・p99 141 µs |
+
+  - 往復の遅延は Swift のほうが短い。スループットは小さいメッセージで libzmq の約 1/78、1 KB で約 1/10
+  - 原因の見当:`send` と `receive` のたびに EventLoop へ移る(取り消しの仕掛け、continuation、Waiter の割り当て)。
+    1 通ずつ待って送ると EventLoop の 1 回の処理に 1 通しか入らず、まとめ書きが効かない(システム CPU が多かった)
+  - 改善の方針(段階 4、案):送りと受けに EventLoop へ移らない近道を作る。ロックで守った送りの列に積み、空から 1 通目のときだけ
+    EventLoop を起こして、たまった分をまとめて書く。受けも同じ。libzmq がアプリのスレッドと I/O スレッドを pipe でつなぐのと同じ考え方
+  - libzmq 側の注意:C の計測で、送ってすぐ `zmq_close` すると(linger が無限でも)受けが途中で止まった。計測では受けが終わるまで閉じない
 
 ### 段階 2:実用の機能(中)
 
