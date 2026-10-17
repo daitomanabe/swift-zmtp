@@ -352,3 +352,132 @@ HWM で PUSH が待つ、PUB が満ちた pipe に捨てる、REQ の取り消�
 - 段階 0 だけ:ビルド(警告 0)、自分が足した・変えたテストだけ `Scripts/test.sh --filter <名前>`、通信は 1〜3 通
 - NG なら NG の周りだけ広げて原因を絞り、何が NG で何を広げたかを報告する
 - 全部のテストを流し直さない。git は触らない(コミットは設計の側がする)
+
+## 5. 段階 2 の設計(2026-10-17)
+
+段階 1 のエンジン(2.2、2.6)の上に足す。順番に 5 つの作業に分けて Sonnet に任せる(5.1 → 5.6)。どの作業も段階 1 のテストを壊さないこと。
+
+### 5.1 接続の抽象化
+
+いまの `Pipe.link` は `.linked(ConnectionHandler)` で、TCP の NIO ハンドラーに直結している。inproc は NIO の Channel を持たないので、
+pipe から見た「接続」を内部のプロトコルにする:
+
+```swift
+/// What a pipe needs from the connection under it (TCP or IPC through NIO, or an inproc link).
+protocol PipeConnection: AnyObject {
+    var isReady: Bool { get }        // handshake done
+    var isAttached: Bool { get }     // the socket accepted the connection; messages may flow
+    /// Hands `messages` to the connection. `completed` runs on the socket's loop when they have left
+    /// (TCP: the write finished or failed; inproc: the peer took them and has room again).
+    func write(_ messages: [[ByteBuffer]], completed: @escaping () -> Void)
+    func writeSubscription(_ topic: ByteBuffer, subscribe: Bool)
+    func resumeReadIfNeeded()
+    func close()
+    var endpoint: String { get }     // for events
+}
+```
+
+- `Pipe` の書き込み(まとめ書き、`writing` の数え方)は `PipeConnection.write` を通す。`ConnectionHandler` がこれに従う
+- 名前は実装の側で決めてよい。中身が同じなら形は変えてよい
+
+### 5.2 IPC(Unix ドメインソケット)
+
+- endpoint:`ipc://PATH`(相対でも絶対でもよい)。bind の `ipc://*` は一時ディレクトリの中に重ならない名前を作り、`bind` がその endpoint を返す
+- bind:前の実行が残したファイルがあれば消してから bind する(libzmq と同じ)。`close()` のとき、自分が作ったファイルを消す
+- パスが長すぎる(macOS は 103 バイトまで)ときは `invalidEndpoint`
+- TCP_NODELAY は付けない。ほかは TCP と同じ(再接続・HWM・握手)
+- NIO:`ServerBootstrap.bind(unixDomainSocketPath:cleanupExistingSocketFile:)`、`ClientBootstrap.connect(unixDomainSocketPath:)`
+
+### 5.3 ハートビートと握手の時間切れ
+
+`SocketOptions` に足す(どれも libzmq と同じ意味と既定):
+
+```swift
+public var heartbeatInterval: Duration? = nil   // HEARTBEAT_IVL: send PING this often; nil: off
+public var heartbeatTimeout: Duration? = nil    // HEARTBEAT_TIMEOUT: no traffic this long after a PING → close; nil: = interval
+public var heartbeatTTL: Duration? = nil        // HEARTBEAT_TTL: told to the peer in PING (0.1 s units, at most 6553.5 s)
+public var handshakeTimeout: Duration? = .seconds(30)  // HANDSHAKE_IVL: handshake not done in time → close; nil: no limit
+```
+
+- PING を送るのは握手のあとで、相手が ZMTP 3.1 以上のときだけ(3.0 に PING は無い)。PING の文脈は空
+- PING を送ったら時間切れの見張りを始める。**何か受け取ったら**(どのバイトでも)見張りを止める。時間切れなら接続を閉じる
+  (connect の側はつなぎ直す)
+- 相手の PING に TTL があれば、その時間のうちに何も受け取らなければ閉じる(libzmq と同じ。受け取るたびに止める)
+- ZMTP の核に足す:`encodePing(ttl:context:into:)`、PING を受けたことを知らせる `Output`(TTL 付き。PONG の `.write` はこれまでどおり)
+- 時計は `ConnectionHandler` が EventLoop の `scheduleTask` で持つ。核は時計を持たない
+
+### 5.4 接続の出来事(monitor)
+
+```swift
+public enum SocketEvent: Sendable, Equatable {
+    case listening(endpoint: String)
+    case bindFailed(endpoint: String, reason: String)
+    case accepted(endpoint: String)                  // a peer connected to a bound endpoint
+    case connected(endpoint: String)                 // our connect reached the peer
+    case connectRetried(endpoint: String, after: Duration)
+    case handshakeSucceeded(endpoint: String, peerSocketType: String)
+    case handshakeFailed(endpoint: String, reason: String)
+    case disconnected(endpoint: String)
+    case closed
+}
+```
+
+- `ZMQSocket` に `func events() -> AsyncStream<SocketEvent>` を足す。呼ぶたびに新しい列(何人でも聞ける)。
+  各列は `.bufferingNewest(256)`(聞き手が遅くても際限なく伸びない)。ソケットが閉じたら `.closed` を流して終える
+- 呼ぶ前に起きた出来事は流さない
+
+### 5.5 inproc(同じプロセスの中)
+
+- endpoint:`inproc://NAME`(NAME は空でない)。**同じ `ZMQContext` の中だけ**でつながる
+- `ZMQContext` が名前の表を持つ(`Synchronization.Mutex`)。bind が名前を登録し、同じ名前がすでにあれば `bindFailed`。
+  `close()` で登録を外す
+- connect:TCP と同じく、その時点で pipe を作る(相手がいなくても送ったものはたまる)。名前が登録されていなければ表の「待ち」に入り、
+  その名前の bind が来たらつながる。相手が閉じたら pipe は外れ、次の bind を待つ(TCP のつなぎ直しにあたる)
+- ZMTP は通さない。つなぐときに両方の Socket-Type と Identity を `Metadata` として渡し合い、型の組み合わせを確かめ、
+  両方の `behavior.pipeAttached` を呼ぶ(どちらかが断れば切る)
+- 2 つのソケットは別の EventLoop にいる。メッセージは送り手の EventLoop でまとめ、受け手の EventLoop へ渡す
+- **背圧**:受け手の受けの列(`receiveHighWaterMark`)に空きがあれば、渡したあとすぐ送り手に「済んだ」を返す。満ちていれば、
+  受け手のアプリが読んで空きができたときに返す。送り手は「済んだ」まで `writing` に数えるので、送りの HWM で待つ
+  (TCP でカーネルのバッファが満ちたのと同じ振る舞い)
+- 購読(SUB → PUB)は、受け手の EventLoop で `behavior.peerSubscribed` / `peerCancelled` を直接呼ぶ
+- 出来事:`connected`・`accepted`・`handshakeSucceeded`・`disconnected` を TCP と同じように出す
+
+### 5.6 XPUB・XSUB・proxy
+
+- `XPubSocket`:PUB と同じに送る。`receive()` は次を返す:
+
+  ```swift
+  public enum XPubMessage: Sendable, Hashable {
+      case subscribe(prefix: Frame)     // the first subscriber of this prefix (over all peers)
+      case unsubscribe(prefix: Frame)   // the last subscriber of this prefix left (CANCEL or disconnect)
+      case message(Message)             // anything else an XSUB peer sent upstream
+  }
+  ```
+
+  前方一致ごとに全部の pipe を通した数を持ち、0 → 1 で `subscribe`、1 → 0 で `unsubscribe`(libzmq の既定。VERBOSE は作らない)。
+  pipe が切れたら、その pipe の購読を全部取り消したものとして数える
+- `XSubSocket`:`subscribe(_:)` / `unsubscribe(_:)`(SUB と同じ数え方で上流へ送る)と、`send(_ message:)`。`send` は
+  フレーム 1 つで先頭が 0x01 / 0x00 なら購読 / 取り消しとして扱い、ほかは上流の全部の pipe へそのまま送る。受けは SUB と同じだが
+  **自分では絞らない**(libzmq の XSUB と同じ)
+- `proxy(frontend:backend:)`:2 つのソケットのあいだを両方向に流し続ける async 関数。どちらかが閉じるか、Task が取り消されたら終わる。
+  使える組み合わせ:XSUB ↔ XPUB(購読は XPUB → XSUB へ流れる)、ROUTER ↔ DEALER、PULL → PUSH。内部の生の送受信
+  (ROUTER は先頭に routing ID、XPUB は購読を 0x01 / 0x00 のメッセージで)を通す
+
+### 5.7 オプション
+
+- `routerMandatory: Bool = false`(ROUTER):知らない routing ID への `send` は `ZMQError.hostUnreachable`、満ちた相手には待つ
+- `conflate: Bool = false`(PUSH・PULL・PUB・SUB・DEALER):送りの列と受けの列に、最後の 1 通だけを残す(HWM は見ない)
+- `immediate: Bool = false`:connect の側の pipe を、握手が済むまで送り先にしない。切れたら、たまっていたものを捨てる
+- `tcpKeepAlive: Duration? = nil`:TCP の keepalive を入れ、何もない時間がこれだけ続いたら確かめを始める
+  (macOS は TCP_KEEPALIVE、Linux は TCP_KEEPIDLE)
+
+### 5.8 複数のソケットを同時に待つ
+
+API は足さない。`withThrowingTaskGroup` でソケットごとに `messages` を回す例を README に書く(`zmq_poll` にあたる)
+
+### 5.9 段階 2 の pyzmq との通信のテスト
+
+- IPC:PUSH → PULL と REQ → REP を両方向(Swift が bind・pyzmq が bind)
+- XPUB ← pyzmq の SUB(購読の知らせが届く)、XSUB → pyzmq の XPUB(購読が届き、メッセージを受ける)
+- ハートビート:Swift の PUSH(ハートビートあり)と pyzmq の PULL。相手のプロセスを `SIGSTOP` で止めると、時間切れで `disconnected` が出る。
+  `SIGCONT` で戻すと、つなぎ直して `handshakeSucceeded` が出て、次のメッセージが届く
