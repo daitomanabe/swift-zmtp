@@ -5,9 +5,10 @@ no libzmq, no libsodium, no XCFramework. Sockets are built on SwiftNIO and used 
 
 日本語は [README.ja.md](README.ja.md)。
 
-> **Early version.** This is stage 1 of the [plan](PLAN.md): TCP, the NULL mechanism (no authentication), and the
-> socket types PUSH, PULL, PUB, SUB, REQ, REP, DEALER, ROUTER and PAIR. The API will change before 1.0.
-> IPC, inproc, heartbeats and XPUB/XSUB come next; PLAIN and CURVE after that.
+> **Early version.** Stages 1 and 2 of the [plan](PLAN.md) are done: the transports `tcp://`, `ipc://` and
+> `inproc://`, the NULL mechanism (no authentication), heartbeats, socket events, and the socket types PUSH, PULL,
+> PUB, SUB, XPUB, XSUB, REQ, REP, DEALER, ROUTER and PAIR, plus a proxy. The API will change before 1.0.
+> PLAIN and CURVE come next.
 
 ## Why
 
@@ -53,15 +54,38 @@ try await req.connect("tcp://192.168.0.10:5555")
 let reply = try await req.request("ping")                 // send and wait for the reply in one call
 ```
 
+Waiting on several sockets at once (what `zmq_poll` does in C) is a task group:
+
+```swift
+try await withThrowingTaskGroup(of: Void.self) { group in
+    group.addTask { for try await message in control.messages { handleControl(message) } }
+    group.addTask { for try await message in frames.messages { handleFrame(message) } }
+    try await group.waitForAll()
+}
+```
+
+Heartbeats and connection events:
+
+```swift
+var options = SocketOptions()
+options.heartbeatInterval = .seconds(1)      // PING every second; no answer within a second closes and reconnects
+let push = PushSocket(options: options)
+Task { for await event in push.events() { print(event) } }   // connected, handshakeSucceeded, disconnected, …
+try await push.connect("tcp://192.168.0.10:5555")
+```
+
 Each socket type has only the operations it supports: `subscribe` exists on `SubSocket`, `RouterSocket.send(_:to:)`
 takes a routing ID, and `ReqSocket.request(_:)` cannot be called out of order. Waiting calls end with
-`CancellationError` when their task is cancelled. Options such as high-water marks, linger and the routing ID are set
-with `SocketOptions` when the socket is created.
+`CancellationError` when their task is cancelled. Options such as high-water marks, linger, the routing ID, heartbeats,
+`conflate`, `immediate`, `routerMandatory` and `tcpKeepAlive` are set with `SocketOptions` when the socket is created.
+`ZMQProxy.run(frontend:backend:)` forwards between XSUB and XPUB, ROUTER and DEALER, or PULL and PUSH.
 
 ## Compatibility
 
-Tested against libzmq 4.3.5 through pyzmq 27.2.0: every pair of the socket types above, with the Swift side binding
-and with it connecting. Handshake bytes are checked against recorded libzmq traffic, including ZMTP 3.0 peers.
+Tested against libzmq 4.3.5 through pyzmq 27.2.0, with the Swift side binding and with it connecting: every pair of
+the stage 1 socket types over TCP; PUSH/PULL and REQ/REP over IPC; XPUB and XSUB with libzmq SUB and XPUB peers; and
+heartbeats both ways, including a libzmq peer that is frozen with `SIGSTOP` and resumed. Handshake bytes are checked
+against recorded libzmq traffic, including ZMTP 3.0 peers. `inproc://` connects sockets of the same `ZMQContext` only.
 
 ## Performance
 

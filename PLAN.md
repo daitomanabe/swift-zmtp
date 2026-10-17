@@ -203,16 +203,27 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
     EventLoop を起こして、たまった分をまとめて書く。受けも同じ。libzmq がアプリのスレッドと I/O スレッドを pipe でつなぐのと同じ考え方
   - libzmq 側の注意:C の計測で、送ってすぐ `zmq_close` すると(linger が無限でも)受けが途中で止まった。計測では受けが終わるまで閉じない
 
-### 段階 2:実用の機能(中)
+### 段階 2:実用の機能(中)— 済み(2026-10-17)
 
 - IPC(Unix ドメインソケット)、inproc(同じプロセスの中。ZMTP を通さない)
 - ハートビート(PING / PONG、HEARTBEAT_IVL / TIMEOUT / TTL)
 - XPUB/XSUB(購読の知らせ)と proxy(XSUB と XPUB の中継)
-- 複数のソケットを同時に待つ(`zmq_poll` にあたるものを、AsyncSequence の合流で)
+- 複数のソケットを同時に待つ(`zmq_poll` にあたるもの)→ API は足さず、`withThrowingTaskGroup` の例を README に書いた
 - よく使うオプション:ROUTER_MANDATORY、CONFLATE、IMMEDIATE、ROUTING_ID、MAXMSGSIZE、TCP_KEEPALIVE
 - 接続の出来事の AsyncStream
 - できあがり:IPC と inproc で段階 1 と同じ確認が通る。pyzmq の相手を止めると、ハートビートで切れたことに気づき、
   相手を戻すと再接続する
+- 結果:設計は `docs/DESIGN.md` の 5 章(決めたことは 5.10)。実装は Sonnet 5.5 のサブエージェント、確認とコミットは Opus 5.5
+  - 接続の抽象化(`PipeConnection`)、IPC、inproc(同じ `ZMQContext` の中、受け手に空きができるまで「済んだ」を返さない背圧)、
+    ハートビートと握手の時間切れ、接続の出来事(`events()`)、`XPubSocket`・`XSubSocket`・`ZMQProxy`、
+    `routerMandatory`・`conflate`・`immediate`・`tcpKeepAlive`
+  - テスト:ZMTPTests 12 本、ZMQTests 42 本、InteropTests 18 本(段階 1 の 11 本と段階 2 の 7 本、pyzmq 27.2.0 / libzmq 4.3.5)
+  - libzmq との食い違いを 1 つ見つけて直した:libzmq の SUB は購読のたびに SUBSCRIBE を送り、CANCEL は最後の取り消しでだけ送る。
+    libzmq の PUB は相手ごとの購読を集合で持つ。こちらの PUB は数えていたので、同じ前方一致を 2 回購読した libzmq の SUB が抜けたあとも送り続けた。
+    集合に直し、本物の libzmq の SUB を相手にした試験で確かめた
+  - 相手のプロセスを `SIGSTOP` で止めると約 0.4 秒で `disconnected`、`SIGCONT` で戻すと再接続して次のメッセージが届いた
+  - 揺れた試験が 1 本あった(libzmq の相手からのハートビートで接続が保たれる試験)。原因は試験の側で、相手が送ってすぐ閉じたのを切断と数えていた。
+    相手が送ったあとも待つようにして直した。ライブラリの側の時間切れで切れた記録は無かった
 
 ### 段階 3:認証と暗号(中〜大)
 
