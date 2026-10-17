@@ -67,3 +67,24 @@ private func plainServer(_ type: SocketType) -> ZMTPConnection {
     #expect(events(outputs).first?.hasPrefix("closed:invalidConfiguration") == true)
     #expect(written(outputs).isEmpty)
 }
+
+/// libzmq 4.3.5 names PLAIN's ERROR command with the C string "\x05ERROR", which is the five bytes
+/// 5E "RROR". A refusal from a libzmq server arrives like this (seen with a real libzmq: `04 09 5E 52 52 4F
+/// 52 03 34 30 30`); the client must report the reason and not a parse error.
+@Test func plainClientReadsTheErrorCommandOfLibzmq() throws {
+    let greeting = Array(try Fixture.named("plain-push-pull").serverStream.prefix(64))
+    var push = plainClient(.push, username: "admin", password: "wrong")
+    _ = push.start()
+    let refused = feed(&push, greeting + [0x04, 0x09, 0x5E, 0x52, 0x52, 0x4F, 0x52, 0x03] + Array("400".utf8))
+    #expect(events(refused) == ["closed:peerError(reason: \"400\")"])
+    #expect(!push.isReady)
+}
+
+@Test func plainClientRejectsATruncatedErrorCommandOfLibzmq() throws {
+    let greeting = Array(try Fixture.named("plain-push-pull").serverStream.prefix(64))
+    var push = plainClient(.push, username: "admin", password: "wrong")
+    _ = push.start()
+    // The reason is announced as 3 bytes but only 2 follow.
+    let refused = feed(&push, greeting + [0x04, 0x08, 0x5E, 0x52, 0x52, 0x4F, 0x52, 0x03] + Array("40".utf8))
+    #expect(events(refused).first?.hasPrefix("closed:malformedCommand") == true)
+}

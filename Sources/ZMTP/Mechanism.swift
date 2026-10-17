@@ -101,11 +101,11 @@ enum Mechanism: Sendable {
             default: throw .unexpected("expected READY, got \(command.name)")
             }
         case .plainClient(var client):
-            let step = try client.receive(try Command(body: body))
+            let step = try client.receive(try plainHandshakeCommand(body))
             self = .plainClient(client)
             return step
         case .plainServer(var server):
-            let step = try server.receive(try Command(body: body))
+            let step = try server.receive(try plainHandshakeCommand(body))
             self = .plainServer(server)
             return step
         case .curveClient(var client):

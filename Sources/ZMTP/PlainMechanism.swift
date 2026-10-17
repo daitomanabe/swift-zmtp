@@ -24,6 +24,28 @@ let plainCredentialLimit = 255
 /// The ERROR reason a PLAIN server sends when the credentials are refused (like libzmq's ZAP status).
 let plainDeniedReason = "400"
 
+/// Parses the body of a command received during the PLAIN handshake.
+///
+/// One difference from 24/ZMTP-PLAIN is accepted here: libzmq 4.3.5 declares the name of PLAIN's ERROR
+/// command as the C string "\x05ERROR". A hexadecimal escape takes every hex digit after it, and `E` is
+/// one, so the string is the five bytes 0x5E "RROR" and not 0x05 "ERROR". A libzmq server that refuses a
+/// login therefore sends `5E 52 52 4F 52`, a reason length and the reason. Read as an ordinary command
+/// that is a name longer than the frame. We read it as ERROR, so the application sees the reason (for
+/// example "400") and not a parse error.
+///
+/// We still send the form of the specification. A libzmq PLAIN client expects its own form and reports
+/// ours as an unexpected command; it closes the connection either way.
+func plainHandshakeCommand(_ body: ByteBuffer) throws(ZMTPError) -> Command {
+    let libzmqErrorName: [UInt8] = [0x5E, 0x52, 0x52, 0x4F, 0x52]
+    guard body.readableBytesView.starts(with: libzmqErrorName) else { return try Command(body: body) }
+    var data = body
+    data.moveReaderIndex(forwardBy: libzmqErrorName.count)
+    guard let reasonLength: UInt8 = data.readInteger(), let reason = data.readString(length: Int(reasonLength)) else {
+        throw .malformedCommand("truncated ERROR reason")
+    }
+    return .error(reason: reason)
+}
+
 /// The connecting side of PLAIN.
 struct PlainClient: Sendable {
     private enum State: Sendable {
