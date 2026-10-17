@@ -35,6 +35,11 @@ let package = Package(
             name: "ZMQTests",
             dependencies: ["ZMQ"]
         ),
+        // Talks to a real libzmq (pyzmq via Tools/interop/peer.py). Runs only with ZMQ_INTEROP=1.
+        .testTarget(
+            name: "InteropTests",
+            dependencies: ["ZMQ"]
+        ),
         .testTarget(
             name: "ZMTPTests",
             dependencies: ["ZMTP"],
