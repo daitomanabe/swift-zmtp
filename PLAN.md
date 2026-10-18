@@ -93,7 +93,8 @@ GitHub で言語を Swift に絞って `zmtp` を探すと 0 件だった。
 - Swift 6 の言語モードで警告が出ない。ソケットは Sendable で、どの Task からでも使える
 - async/await と AsyncSequence で書ける
 - macOS と Linux。あとで iOS
-- **2026-10-18 の決定:まず Mac だけで動けばよい**(ユーザー)。Linux のビルドとテスト、iOS(NIOTransportServices)の確認は後で。
+- **2026-10-18 の決定:この後も Mac だけで進める**(ユーザー。最初は「まず Mac だけで動けばよい」、0.1.0 のあとで「この後も Mac だけ」)。
+  Linux のビルドとテスト、iOS(NIOTransportServices)は予定に入れない(要るとわかったら戻す)。
   パッケージの設定(iOS 18・Linux の swift-crypto)は残すが、確かめているのは macOS だけ
 
 ### 3.2 作らないもの
@@ -266,7 +267,7 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
   - テスト:ZMTPTests 12 本、ZMQTests 48 本、InteropTests 18 本が通った
 - まとめ書き(複数のフレームを 1 回の書き込みに)、フレームの写しと割り当てを減らす
 - ベンチ:小さいメッセージのスループットと、REQ/REP の往復の遅延を、libzmq と並べる
-- iOS(NIOTransportServices)— 後で(上の 2026-10-18 の決定)。Linux の確認も後で
+- iOS(NIOTransportServices)と Linux の確認 — 予定に入れない(上の 2026-10-18 の決定。この後も Mac だけで進める)
 - ドキュメントと、zguide の例をいくつか移したもの。DocC の道具は Command Line Tools に無いので、まず英語の手引き `docs/GUIDE.md` にし、
   載せるコードは例のパッケージ(`Examples/`)でビルドして動かしたものにする。DocC は Xcode を入れたときに
 - 版 0.1.0 — 準備済み(2026-10-18):`CHANGELOG.md`、例(`Examples/`)、英語の手引き(`docs/GUIDE.md`)、待ち時間の上限などの足し算(DESIGN 8 章)。
