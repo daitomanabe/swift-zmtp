@@ -34,6 +34,8 @@ There is no tagged release yet.
 
 ## Usage
 
+A longer introduction is in [docs/GUIDE.md](docs/GUIDE.md), and runnable programs (hello world, weather, pipeline, CURVE and more) are in [Examples/](Examples).
+
 ```swift
 import ZMQ
 
