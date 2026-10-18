@@ -685,3 +685,17 @@ Box[X](A→B) = A の秘密鍵と B の公開鍵で作る箱(MAC 16 + 暗号文)
   `maxMessageSize` は暗号化したフレーム(中身より 33 バイト大きい)に当てる
 - libzmq の PLAIN の ERROR は名前が `5E 'RROR'` に崩れている(C の `"\x05ERROR"`)。PLAIN の握手の中ではこの形も ERROR として読む。送るのは仕様の形
 
+
+## 8. 0.1.0 の前の使いやすさ(2026-10-18)
+
+例(`Examples/`)を書いて使いにくかった所のうち、足すだけで直せるものを入れる。どれも既存の API を変えない。
+
+- `Message` と `Frame` を `ExpressibleByStringInterpolation` にする(`req.request("Hello \(n)")` が書ける)
+- `Message.string: String?`:フレームがちょうど 1 つで、UTF-8 として正しいときだけその文字列。ほかは nil
+- 待ち時間の上限。時間切れは新しい `ZMQError.timedOut`:
+  - 受ける型すべてに `receive(timeout: Duration)`(PULL・SUB・XSUB・PAIR・DEALER・ROUTER・REP・XPUB)
+  - 待つことのある送りに `send(_:timeout:)`(PUSH・DEALER・PAIR・ROUTER)。REQ は `request(_:timeout:)`
+  - 作り:操作と `Task.sleep` を task group で競わせ、時間切れなら操作を取り消す。**取り消したあとに操作が値を返したら、その値を返す**
+    (時間切れの瞬間に届いたメッセージを失わない)。取り消しの扱いはいまの仕組み(REQ は遅れた返事を 1 つ捨てる)に任せる。
+    呼んだ Task 自体が取り消されたら `CancellationError`
+- 足さないもの(いまは):つながるまで待つ関数、`ZMQSocket` の共通の `receive`、鍵の 16 進の文字列
