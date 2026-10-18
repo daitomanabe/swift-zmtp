@@ -16,4 +16,8 @@ public enum ZMQError: Error, Sendable, Equatable {
     /// A ROUTER socket with `options.routerMandatory` was asked to send to a routing ID that no connected
     /// peer has.
     case hostUnreachable(RoutingID)
+    /// A call with a `timeout:` did not finish in time. A `receive(timeout:)` that throws this has taken
+    /// no message (a later `receive` gets it), a `send(_:timeout:)` has queued nothing, and a
+    /// `request(_:timeout:)` has given up the request (a late reply to it is dropped).
+    case timedOut
 }

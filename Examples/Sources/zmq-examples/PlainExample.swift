@@ -33,8 +33,12 @@ enum PlainExample {
             }
             try await req.connect(endpoint)
 
-            let reply = try await timeout(after: .seconds(2)) { try await req.request("Hello") }
-            print("password \"\(password)\": \(reply.map { "reply \"\($0.frames[0].string ?? "")\"" } ?? "no reply within 2 s")")
+            do {
+                let reply = try await req.request("Hello", timeout: .seconds(2))
+                print("password \"\(password)\": reply \"\(reply.string ?? "")\"")
+            } catch ZMQError.timedOut {
+                print("password \"\(password)\": no reply within 2 s")
+            }
             await req.close()
             await log.value
         }

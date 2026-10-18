@@ -41,6 +41,13 @@ public final class SubSocket: ZMQSocket {
         Message(wireFrames: try await engine.receive())
     }
 
+    /// Like `receive()`, but gives up after `timeout`: it throws `ZMQError.timedOut` and takes no
+    /// message, so a later `receive` still gets what arrives next. A message that arrives at the deadline
+    /// is returned, not lost. Cancelling the task ends the call with `CancellationError`.
+    public func receive(timeout: Duration) async throws -> Message {
+        try await withTimeLimit(timeout) { try await self.receive() }
+    }
+
     /// Every message until the socket is closed.
     public var messages: MessageSequence<Message> {
         MessageSequence { try await self.receive() }

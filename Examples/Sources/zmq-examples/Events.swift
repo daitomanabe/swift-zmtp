@@ -33,7 +33,7 @@ enum Events {
         try await push.bind(endpoint)
         try await push.send("hello")
         let message = try await pull.receive()
-        print("3. PULL received \"\(message.frames[0].string ?? "(binary data)")\"")
+        print("3. PULL received \"\(message.string ?? "(binary data)")\"")
 
         print("4. the PUSH socket closes")
         await push.close()

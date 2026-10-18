@@ -28,6 +28,13 @@ public final class RepSocket: ZMQSocket {
         Message(wireFrames: try await engine.receive())
     }
 
+    /// Like `receive()`, but gives up after `timeout`: it throws `ZMQError.timedOut` and takes no
+    /// message, so a later `receive` still gets what arrives next. A message that arrives at the deadline
+    /// is returned, not lost. Cancelling the task ends the call with `CancellationError`.
+    public func receive(timeout: Duration) async throws -> Message {
+        try await withTimeLimit(timeout) { try await self.receive() }
+    }
+
     /// Sends `message` as the answer to the request taken last. Throws `ZMQError.invalidState` when
     /// there is none. If the requester has gone, or its queue is full, the answer is dropped silently.
     public func reply(_ message: Message) async throws {

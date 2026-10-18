@@ -26,8 +26,22 @@ public final class PairSocket: ZMQSocket {
         try await engine.send(message.wireFrames())
     }
 
+    /// Like `send(_:)`, but gives up after `timeout`: it throws `ZMQError.timedOut` and queues nothing.
+    /// Only a send that has to wait can time out. Cancelling the task ends the call with
+    /// `CancellationError`.
+    public func send(_ message: Message, timeout: Duration) async throws {
+        try await withTimeLimit(timeout) { try await self.send(message) }
+    }
+
     public func receive() async throws -> Message {
         Message(wireFrames: try await engine.receive())
+    }
+
+    /// Like `receive()`, but gives up after `timeout`: it throws `ZMQError.timedOut` and takes no
+    /// message, so a later `receive` still gets what arrives next. A message that arrives at the deadline
+    /// is returned, not lost. Cancelling the task ends the call with `CancellationError`.
+    public func receive(timeout: Duration) async throws -> Message {
+        try await withTimeLimit(timeout) { try await self.receive() }
     }
 
     public var messages: MessageSequence<Message> {

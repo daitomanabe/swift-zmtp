@@ -42,7 +42,7 @@ enum OptionsTour {
         let push = PushSocket(options: tunedOptions())
         try await push.connect(endpoint)
         try await push.send("hello")
-        print("  received \"\(try await pull.receive().frames[0].string ?? "")\"")
+        print("  received \"\(try await pull.receive().string ?? "")\"")
         await push.close()
         await pull.close()
     }
@@ -55,9 +55,12 @@ enum OptionsTour {
         let push = PushSocket(options: options)
         try await push.connect(try await unusedEndpoint())
         for number in 1...3 {
-            let message = Message("message \(number)")
-            let queued = try await timeout(after: .milliseconds(300)) { try await push.send(message) } != nil
-            print("  message \(number): \(queued ? "queued" : "still waiting for room after 300 ms")")
+            do {
+                try await push.send("message \(number)", timeout: .milliseconds(300))
+                print("  message \(number): queued")
+            } catch ZMQError.timedOut {
+                print("  message \(number): still waiting for room after 300 ms")
+            }
         }
         await push.close()
     }
@@ -71,13 +74,13 @@ enum OptionsTour {
         let push = PushSocket(options: options)
         let endpoint = try await unusedEndpoint()
         try await push.connect(endpoint)
-        for value in 1...5 { try await push.send(Message("value \(value)")) }   // never waits, keeps the newest
+        for value in 1...5 { try await push.send("value \(value)") }   // never waits, keeps the newest
 
         let pull = PullSocket()
         try await pull.bind(endpoint)
         let newest = try await pull.receive()
-        print("  received \"\(newest.frames[0].string ?? "")\"")
-        let more = try await timeout(after: .milliseconds(300)) { try await pull.receive() }
+        print("  received \"\(newest.string ?? "")\"")
+        let more = try? await pull.receive(timeout: .milliseconds(300))   // times out: nothing else is queued
         print("  anything else after that? \(more == nil ? "no" : "yes")")
         await push.close()
         await pull.close()
@@ -93,8 +96,12 @@ enum OptionsTour {
             options.immediate = useImmediate
             let push = PushSocket(options: options)
             try await push.connect(endpoint)
-            let queued = try await timeout(after: .milliseconds(300)) { try await push.send("hello") } != nil
-            print("  immediate = \(useImmediate): \(queued ? "send returned, the message is queued" : "send is still waiting for a peer")")
+            do {
+                try await push.send("hello", timeout: .milliseconds(300))
+                print("  immediate = \(useImmediate): send returned, the message is queued")
+            } catch ZMQError.timedOut {
+                print("  immediate = \(useImmediate): send is still waiting for a peer")
+            }
             await push.close()
         }
     }

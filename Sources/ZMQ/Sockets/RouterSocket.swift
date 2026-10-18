@@ -32,6 +32,13 @@ public final class RouterSocket: ZMQSocket {
         return RoutedMessage(routingID: routingID, message: Message(wireFrames: frames))
     }
 
+    /// Like `receive()`, but gives up after `timeout`: it throws `ZMQError.timedOut` and takes no
+    /// message, so a later `receive` still gets what arrives next. A message that arrives at the deadline
+    /// is returned, not lost. Cancelling the task ends the call with `CancellationError`.
+    public func receive(timeout: Duration) async throws -> RoutedMessage {
+        try await withTimeLimit(timeout) { try await self.receive() }
+    }
+
     /// Sends `message` to the peer with `routingID`. A routing ID nobody has, or a peer at its send
     /// high-water mark, drops the message silently; this call never waits and does not throw for it.
     ///
@@ -41,6 +48,14 @@ public final class RouterSocket: ZMQSocket {
     /// served in order, so a send that waits holds up the ones behind it, also those for other peers.
     public func send(_ message: Message, to routingID: RoutingID) async throws {
         try await engine.send([routingID.frame.buffer] + message.wireFrames())
+    }
+
+    /// Like `send(_:to:)`, but gives up after `timeout`: it throws `ZMQError.timedOut` and queues
+    /// nothing. Only a send that has to wait can time out, which means a peer at its send high-water mark
+    /// with `options.routerMandatory`; every other send returns at once. Cancelling the task ends the call
+    /// with `CancellationError`.
+    public func send(_ message: Message, to routingID: RoutingID, timeout: Duration) async throws {
+        try await withTimeLimit(timeout) { try await self.send(message, to: routingID) }
     }
 
     /// Every message until the socket is closed.

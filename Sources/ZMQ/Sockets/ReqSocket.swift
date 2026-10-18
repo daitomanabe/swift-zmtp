@@ -37,6 +37,16 @@ public final class ReqSocket: ZMQSocket {
             throw CancellationError()
         }
     }
+
+    /// Like `request(_:)`, but gives up after `timeout`: it throws `ZMQError.timedOut`. The time covers
+    /// everything the call waits for: an earlier request still open, a peer to take the message, and the
+    /// reply. When it runs out after the request went out, the request is given up exactly as when its
+    /// task is cancelled: the socket is free for the next `request`, and a late reply is dropped. A reply
+    /// that arrives at the deadline is returned, not lost. Cancelling the task ends the call with
+    /// `CancellationError`.
+    public func request(_ message: Message, timeout: Duration) async throws -> Message {
+        try await withTimeLimit(timeout) { try await self.request(message) }
+    }
 }
 
 final class ReqBehavior: SocketBehavior {

@@ -61,8 +61,8 @@ enum MultithreadedServer {
             try await rep.connect(workersEndpoint)
             while true {
                 let request = try await rep.receive()
-                let text = request.frames[0].string ?? "(binary data)"
-                try await rep.reply(Message("World (\(text)) from worker \(id)"))
+                let text = request.string ?? "(binary data)"
+                try await rep.reply("World (\(text)) from worker \(id)")
             }
         } catch {
             // Cancelled: the server is stopping.
@@ -75,8 +75,8 @@ enum MultithreadedServer {
         let req = ReqSocket()
         try await req.connect(endpoint)
         for number in 0..<count {
-            let reply = try await req.request(Message("Hello \(number)"))
-            print("mtserver: client \(id) got \"\(reply.frames[0].string ?? "(binary data)")\"")
+            let reply = try await req.request("Hello \(number)")
+            print("mtserver: client \(id) got \"\(reply.string ?? "(binary data)")\"")
         }
         await req.close()
     }

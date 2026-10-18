@@ -50,7 +50,7 @@ enum Pipeline {
         for _ in 0..<taskCount {
             let milliseconds = Int.random(in: 1...100)
             totalMilliseconds += milliseconds
-            try await tasks.send(Message(String(milliseconds)))
+            try await tasks.send("\(milliseconds)")
         }
         print("taskvent: sent \(taskCount) tasks, total expected cost \(totalMilliseconds) ms")
 
@@ -74,14 +74,18 @@ enum Pipeline {
         print("taskwork: ready")
 
         var done = 0
-        // receive() is cancelled when the timeout ends, and a cancelled receive loses no message.
-        while let task = try await timeout(after: .seconds(idle), { try await tasks.receive() }) {
-            let milliseconds = Int(task.frames[0].string ?? "") ?? 0
-            try await Task.sleep(for: .milliseconds(milliseconds))   // the "work"
-            try await results.send(Message(Frame()))                 // the result: one empty frame
-            done += 1
+        do {
+            while true {
+                // Throws ZMQError.timedOut when no task comes within `idle` seconds, and takes no message then.
+                let task = try await tasks.receive(timeout: .seconds(idle))
+                let milliseconds = Int(task.string ?? "") ?? 0
+                try await Task.sleep(for: .milliseconds(milliseconds))   // the "work"
+                try await results.send(Message(Frame()))                 // the result: one empty frame
+                done += 1
+            }
+        } catch ZMQError.timedOut {
+            print("taskwork: no task for \(idle) s, done \(done) tasks")
         }
-        print("taskwork: no task for \(idle) s, done \(done) tasks")
         await tasks.close()
         await results.close()
     }

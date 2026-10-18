@@ -6,7 +6,9 @@ import Foundation
 import NIOCore
 
 /// One frame of a message: an immutable run of bytes. Copies of a frame share their storage.
-public struct Frame: Sendable, Hashable, ExpressibleByStringLiteral {
+///
+/// A string literal, with or without interpolation, makes a frame of its UTF-8 bytes.
+public struct Frame: Sendable, Hashable, ExpressibleByStringInterpolation {
     package private(set) var buffer: ByteBuffer
 
     /// An empty frame.
@@ -29,6 +31,10 @@ public struct Frame: Sendable, Hashable, ExpressibleByStringLiteral {
 
     public init(stringLiteral value: String) {
         self.init(value)
+    }
+
+    public init(stringInterpolation: DefaultStringInterpolation) {
+        self.init(String(stringInterpolation: stringInterpolation))
     }
 
     /// Wraps `buffer` without copying it.

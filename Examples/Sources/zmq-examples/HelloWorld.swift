@@ -26,7 +26,7 @@ enum HelloWorld {
         var served = 0
         while served < limit {
             let request = try await rep.receive()
-            print("hwserver: received \(request.frames[0].string ?? "(binary data)")")
+            print("hwserver: received \(request.string ?? "(binary data)")")
             try await rep.reply("World")
             served += 1
         }
@@ -46,7 +46,7 @@ enum HelloWorld {
         for number in 0..<count {
             print("hwclient: sending Hello \(number)")
             let reply = try await req.request("Hello")
-            print("hwclient: received \(reply.frames[0].string ?? "(binary data)") \(number)")
+            print("hwclient: received \(reply.string ?? "(binary data)") \(number)")
         }
         await req.close()
     }

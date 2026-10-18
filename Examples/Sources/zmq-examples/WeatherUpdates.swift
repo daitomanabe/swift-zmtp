@@ -25,7 +25,7 @@ enum WeatherUpdates {
             let temperature = Int.random(in: -20...45)
             let humidity = Int.random(in: 10...90)
             // Two frames: the topic, then the data. A subscriber to "10003" gets the whole message.
-            try await pub.send(Message([Frame(String(zipCode)), Frame("\(temperature) \(humidity)")]))
+            try await pub.send(["\(zipCode)", "\(temperature) \(humidity)"])
             try await Task.sleep(for: .milliseconds(10))
         }
     }

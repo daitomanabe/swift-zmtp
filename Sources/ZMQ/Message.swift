@@ -6,7 +6,10 @@ import Foundation
 import NIOCore
 
 /// A multipart message: one or more frames that travel together.
-public struct Message: Sendable, Hashable, ExpressibleByStringLiteral, ExpressibleByArrayLiteral {
+///
+/// A string literal, with or without interpolation, makes a one-frame message of its UTF-8 bytes:
+/// `try await req.request("Hello \(number)")`.
+public struct Message: Sendable, Hashable, ExpressibleByStringInterpolation, ExpressibleByArrayLiteral {
     public var frames: [Frame]
 
     public init(_ frames: [Frame]) {
@@ -30,8 +33,18 @@ public struct Message: Sendable, Hashable, ExpressibleByStringLiteral, Expressib
         self.init(value)
     }
 
+    public init(stringInterpolation: DefaultStringInterpolation) {
+        self.init(String(stringInterpolation: stringInterpolation))
+    }
+
     public init(arrayLiteral elements: Frame...) {
         self.frames = elements
+    }
+
+    /// The text of a one-frame message: its bytes read as UTF-8. nil when the message has more or fewer
+    /// than one frame, or when the frame is not valid UTF-8.
+    public var string: String? {
+        frames.count == 1 ? frames[0].string : nil
     }
 
     /// The frames as the engine sends them. A message needs at least one frame on the wire.

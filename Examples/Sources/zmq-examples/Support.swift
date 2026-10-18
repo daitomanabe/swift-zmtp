@@ -17,9 +17,10 @@ struct ExampleError: Error, CustomStringConvertible {
 
 /// Runs `operation`, but gives up after `limit`: returns nil then, and cancels the operation.
 ///
-/// Every waiting call of this library (`receive`, `request`, `send` at a full queue) ends with
-/// `CancellationError` when its task is cancelled, and a cancelled `receive` loses no message. That is
-/// what makes a time limit this short.
+/// This is how a time limit goes on more than one call (here: on a whole subcommand). For a single call the
+/// sockets have it built in: `receive(timeout:)`, `send(_:timeout:)` and `request(_:timeout:)` throw
+/// `ZMQError.timedOut`. Every waiting call of this library ends with `CancellationError` when its task is
+/// cancelled, and a cancelled `receive` loses no message. That is what makes a limit this short.
 func timeout<T: Sendable>(
     after limit: Duration, _ operation: @escaping @Sendable () async throws -> T
 ) async throws -> T? {

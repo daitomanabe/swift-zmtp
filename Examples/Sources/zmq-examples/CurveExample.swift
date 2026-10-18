@@ -53,7 +53,7 @@ enum CurveExample {
         var served = 0
         while served < limit {
             let request = try await rep.receive()
-            print("curve-server: received \(request.frames[0].string ?? "(binary data)")")
+            print("curve-server: received \(request.string ?? "(binary data)")")
             try await rep.reply("World")
             served += 1
         }
@@ -90,13 +90,15 @@ enum CurveExample {
         print("curve-client: client public key \(keys.publicKey.z85)")
         try await req.connect(endpoint)
         for number in 0..<count {
-            let request = Message("Hello \(number)")
-            guard let reply = try await timeout(after: .seconds(5), { try await req.request(request) }) else {
+            let reply: Message
+            do {
+                reply = try await req.request("Hello \(number)", timeout: .seconds(5))
+            } catch ZMQError.timedOut {
                 await req.close()
                 await log.value
                 throw ExampleError("no reply within 5 s: is the server key right, and does the server accept this client key?")
             }
-            print("curve-client: received \(reply.frames[0].string ?? "(binary data)") \(number)")
+            print("curve-client: received \(reply.string ?? "(binary data)") \(number)")
         }
         await req.close()
         await log.value

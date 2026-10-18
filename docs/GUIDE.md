@@ -47,13 +47,15 @@ The server, from `hwserver` (`HelloWorld.swift`):
 
 ```swift
 let rep = RepSocket()
+// bind() returns the endpoint that was bound; it differs from the one asked for when the
+// endpoint is "tcp://127.0.0.1:*" (the system picks a free port).
 let bound = try await rep.bind(endpoint)
 print("hwserver: listening on \(bound)")
 
 var served = 0
 while served < limit {
     let request = try await rep.receive()
-    print("hwserver: received \(request.frames[0].string ?? "(binary data)")")
+    print("hwserver: received \(request.string ?? "(binary data)")")
     try await rep.reply("World")
     served += 1
 }
@@ -64,12 +66,14 @@ The client, from `hwclient`:
 
 ```swift
 let req = ReqSocket()
+// connect() returns at once. The connection is made in the background, so the server may be
+// started after the client, and a request sent before then waits in the socket.
 try await req.connect(endpoint)
 
 for number in 0..<count {
     print("hwclient: sending Hello \(number)")
     let reply = try await req.request("Hello")
-    print("hwclient: received \(reply.frames[0].string ?? "(binary data)") \(number)")
+    print("hwclient: received \(reply.string ?? "(binary data)") \(number)")
 }
 await req.close()
 ```
@@ -89,7 +93,8 @@ Things to notice, which hold for every socket type:
 - Each socket type has only the calls that make sense for it. A `ReqSocket` has `request(_:)`, which sends and waits for the
   reply in one call, so it cannot be used out of order. A `RepSocket` has `receive()` and `reply(_:)`, and `receive()` throws
   `ZMQError.invalidState` if the last request has not been answered.
-- A string literal is a one-frame `Message`: `reply("World")`. Any other `String` needs `Message(text)`.
+- A string literal is a one-frame `Message`, and so is one with interpolation: `reply("World")`, `request("Hello \(number)")`.
+  A `String` that is a variable needs `Message(text)`. `message.string` reads the text back (see [Messages and frames](#4-messages-and-frames)).
 - `close()` lets queued messages go out first (up to `options.linger`). A socket that is simply released is closed at once.
 
 ## 3. Socket types and which pairs connect
@@ -134,7 +139,7 @@ Some behaviour that surprises people the first time:
   whoever is connected when it sends, so if the first worker connects a moment before the others, it gets all the work.
   The ventilator in `taskvent` waits until its workers are there.
 - **REQ and REP go in lockstep.** If a REQ socket never gets its reply, `request(_:)` waits, until its task is cancelled.
-  Use a time limit ([Cancellation](#8-cancellation-and-time-limits)).
+  Use `request(_:timeout:)` ([Cancellation and time limits](#8-cancellation-and-time-limits)).
 
 ## 4. Messages and frames
 
@@ -162,6 +167,21 @@ frame 1: 3 bytes, text (not text), bytes [0, 255, 16]
 frame 2: 0 bytes, text "", bytes []
 ```
 
+- **Text is the easy case.** A string literal is a `Message` of one frame, also with interpolation, and `message.string` is the text of
+  a message that has exactly one frame and valid UTF-8. For more than one frame, or bytes that may not be text, it is `nil`; use
+  `message.frames[i].string` (or `bytes` and `data`) for those. From `frames`, after the loop above:
+
+```swift
+// The short way to send a single text frame: a string literal, also with interpolation, is a Message.
+// And `string` is the short way to read one back: the text of a message of exactly one UTF-8 frame.
+try await right.send("got \(received.frames.count) frames")
+print("left received \"\(try await left.receive().string ?? "")\"")
+```
+
+```
+left received "got 3 frames"
+```
+
 - A message needs at least one frame: sending `Message([])` throws `ZMQError.invalidState`. The `Frame()` above is an
   empty frame, which is fine.
 - Copies of a frame share their storage, and a received frame is a slice of the network buffer, so passing frames around is cheap.
@@ -170,7 +190,7 @@ frame 2: 0 bytes, text "", bytes []
 
 ```swift
 // Two frames: the topic, then the data. A subscriber to "10003" gets the whole message.
-try await pub.send(Message([Frame(String(zipCode)), Frame("\(temperature) \(humidity)")]))
+try await pub.send(["\(zipCode)", "\(temperature) \(humidity)"])
 ```
 
   and the client in `wuclient` subscribes to the topic and reads both:
@@ -294,9 +314,12 @@ nothing listens, and sends three messages:
 
 ```swift
 for number in 1...3 {
-    let message = Message("message \(number)")
-    let queued = try await timeout(after: .milliseconds(300)) { try await push.send(message) } != nil
-    print("  message \(number): \(queued ? "queued" : "still waiting for room after 300 ms")")
+    do {
+        try await push.send("message \(number)", timeout: .milliseconds(300))
+        print("  message \(number): queued")
+    } catch ZMQError.timedOut {
+        print("  message \(number): still waiting for room after 300 ms")
+    }
 }
 ```
 
@@ -315,7 +338,7 @@ options.conflate = true
 let push = PushSocket(options: options)
 let endpoint = try await unusedEndpoint()
 try await push.connect(endpoint)
-for value in 1...5 { try await push.send(Message("value \(value)")) }   // never waits, keeps the newest
+for value in 1...5 { try await push.send("value \(value)") }   // never waits, keeps the newest
 ```
 
 ```
@@ -333,8 +356,12 @@ for useImmediate in [false, true] {
     options.immediate = useImmediate
     let push = PushSocket(options: options)
     try await push.connect(endpoint)
-    let queued = try await timeout(after: .milliseconds(300)) { try await push.send("hello") } != nil
-    print("  immediate = \(useImmediate): \(queued ? "send returned, the message is queued" : "send is still waiting for a peer")")
+    do {
+        try await push.send("hello", timeout: .milliseconds(300))
+        print("  immediate = \(useImmediate): send returned, the message is queued")
+    } catch ZMQError.timedOut {
+        print("  immediate = \(useImmediate): send is still waiting for a peer")
+    }
     await push.close()
 }
 ```
@@ -366,12 +393,13 @@ do {
 
 ## 7. Receiving, and waiting on several sockets
 
-Every socket that receives has `receive()`, which waits for the next message. All of them except REP also have `messages`, an
+Every socket that receives has `receive()`, which waits for the next message, and `receive(timeout:)`, which gives up after a
+time ([Cancellation and time limits](#8-cancellation-and-time-limits)). All of them except REP also have `messages`, an
 `AsyncSequence` that calls `receive()` until the socket is closed and then ends without an error:
 
 ```swift
 for try await message in tasks.messages {
-    continuation.yield(.task(message.frames[0].string ?? ""))
+    continuation.yield(.task(message.string ?? ""))
 }
 ```
 
@@ -389,7 +417,7 @@ await withThrowingTaskGroup(of: Void.self) { group in
     group.addTask {
         defer { continuation.finish() }   // if a reader ends, so does the loop below
         for try await message in tasks.messages {
-            continuation.yield(.task(message.frames[0].string ?? ""))
+            continuation.yield(.task(message.string ?? ""))
         }
     }
     group.addTask {
@@ -433,8 +461,58 @@ for room or for a peer. Cancelling loses nothing:
 - a cancelled `request(_:)` frees the REQ socket for the next request, and the late reply, if it comes, is dropped;
 - a cancelled `send` has sent nothing.
 
-That makes a time limit a few lines of ordinary Swift. This is `timeout(after:_:)` from `Support.swift`, which all the
-examples use:
+**Time limits are built in.** Every call that can wait has a version with a `timeout:` (a `Duration`), and it throws
+`ZMQError.timedOut` when the time runs out:
+
+| Call | Sockets |
+|---|---|
+| `receive(timeout:)` | PULL, SUB, XSUB, PAIR, DEALER, ROUTER, REP, XPUB |
+| `send(_:timeout:)` | PUSH, DEALER, PAIR (ROUTER: `send(_:to:timeout:)`, which waits only with `routerMandatory`) |
+| `request(_:timeout:)` | REQ |
+
+A time-out is a cancellation with a name, and it keeps the same promise: a `receive(timeout:)` that timed out took no message, a
+`send(_:timeout:)` that timed out sent nothing, and a `request(_:timeout:)` that timed out freed the socket for the next request
+and will drop the late reply. A message that arrives at the very moment of the deadline is returned, not lost. If the task that
+made the call is cancelled, you get `CancellationError`, not `timedOut`. (PUB, XPUB and XSUB `send` and REP `reply` never wait, so they
+have nothing to limit.)
+
+The worker in `taskwork` (`Pipeline.swift`) stops when no task has come for a while:
+
+```swift
+var done = 0
+do {
+    while true {
+        // Throws ZMQError.timedOut when no task comes within `idle` seconds, and takes no message then.
+        let task = try await tasks.receive(timeout: .seconds(idle))
+        let milliseconds = Int(task.string ?? "") ?? 0
+        try await Task.sleep(for: .milliseconds(milliseconds))   // the "work"
+        try await results.send(Message(Frame()))                 // the result: one empty frame
+        done += 1
+    }
+} catch ZMQError.timedOut {
+    print("taskwork: no task for \(idle) s, done \(done) tasks")
+}
+```
+
+and `curve-client` gives up on a request whose server never answers (for example because it refused the client):
+
+```swift
+let reply: Message
+do {
+    reply = try await req.request("Hello \(number)", timeout: .seconds(5))
+} catch ZMQError.timedOut {
+    await req.close()
+    await log.value
+    throw ExampleError("no reply within 5 s: is the server key right, and does the server accept this client key?")
+}
+```
+
+A REQ socket never gives up by itself: a server that does not answer keeps `request(_:)` waiting, so use `request(_:timeout:)`
+for every request that matters. An unreachable peer is not an error for `connect` either; the socket keeps trying
+(see [Events](#9-socket-events) to watch it).
+
+**A limit on more than one call** is a few lines of ordinary Swift, because every waiting call ends cleanly when it is
+cancelled. This is `timeout(after:_:)` from `Support.swift`, which runs each subcommand of `zmq-examples` under its `--seconds` limit:
 
 ```swift
 func timeout<T: Sendable>(
@@ -452,23 +530,14 @@ func timeout<T: Sendable>(
 }
 ```
 
-It returns nil if the operation took longer than `limit`, and cancels it. The worker in `taskwork` (`Pipeline.swift`) stops
-when no task has come for a while:
+It returns nil if the operation took longer than `limit`, and cancels it; `ZMQExamples.swift` calls it like this:
 
 ```swift
-// receive() is cancelled when the timeout ends, and a cancelled receive loses no message.
-while let task = try await timeout(after: .seconds(idle), { try await tasks.receive() }) {
+let finished: Void? =
+    seconds == 0
+    ? try await command.run(arguments)
+    : try await timeout(after: .seconds(seconds)) { try await command.run(arguments) }
 ```
-
-and `curve-client` gives up on a request whose server never answers (for example because it refused the client):
-
-```swift
-guard let reply = try await timeout(after: .seconds(5), { try await req.request(request) }) else {
-```
-
-A REQ socket never gives up by itself: a server that does not answer keeps `request(_:)` waiting, so use a time limit for
-every request that matters. An unreachable peer is not an error for `connect` either; the socket keeps trying
-(see [Events](#9-socket-events) to watch it).
 
 A loop that runs for the life of the program is cancelled the same way: keep its `Task` and call `cancel()`. In `plain`
 (`PlainExample.swift`) the server loop is a task that is cancelled when the demonstration is over:
@@ -713,8 +782,8 @@ do {
     try await rep.connect(workersEndpoint)
     while true {
         let request = try await rep.receive()
-        let text = request.frames[0].string ?? "(binary data)"
-        try await rep.reply(Message("World (\(text)) from worker \(id)"))
+        let text = request.string ?? "(binary data)"
+        try await rep.reply("World (\(text)) from worker \(id)")
     }
 } catch {
     // Cancelled: the server is stopping.

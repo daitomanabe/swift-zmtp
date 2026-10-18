@@ -25,9 +25,10 @@ enum Frames {
             print("frame \(index): \(frame.count) bytes, text \(frame.string.map { "\"\($0)\"" } ?? "(not text)"), bytes \(frame.bytes)")
         }
 
-        // The short way to send a single text frame: a string literal is a Message.
-        try await right.send("pong")
-        print("left received \"\(try await left.receive().frames[0].string ?? "")\"")
+        // The short way to send a single text frame: a string literal, also with interpolation, is a Message.
+        // And `string` is the short way to read one back: the text of a message of exactly one UTF-8 frame.
+        try await right.send("got \(received.frames.count) frames")
+        print("left received \"\(try await left.receive().string ?? "")\"")
 
         // A message needs at least one frame.
         do {

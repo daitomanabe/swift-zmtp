@@ -35,7 +35,7 @@ enum MultiSocketReader {
             group.addTask {
                 defer { continuation.finish() }   // if a reader ends, so does the loop below
                 for try await message in tasks.messages {
-                    continuation.yield(.task(message.frames[0].string ?? ""))
+                    continuation.yield(.task(message.string ?? ""))
                 }
             }
             group.addTask {
