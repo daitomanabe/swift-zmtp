@@ -26,11 +26,11 @@ Contents: [Installing](#1-installing) Â· [A first program](#2-a-first-program) Â
 ## 1. Installing
 
 You need Swift 6 and, today, macOS 15 (see [Limits](#13-limits) for Linux and iOS). Nothing else: no libzmq, no libsodium,
-no XCFramework. There is no tagged release yet, so depend on the branch:
+no XCFramework. Depend on the current release:
 
 ```swift
 // Package.swift (not part of Examples: the Examples package uses a path dependency on the package above it)
-.package(url: "https://github.com/daitomanabe/swift-zmtp.git", branch: "main")
+.package(url: "https://github.com/daitomanabe/swift-zmtp.git", from: "0.1.0")
 ```
 
 ```swift

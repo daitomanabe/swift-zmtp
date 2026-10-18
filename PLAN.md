@@ -269,7 +269,10 @@ Benchmarks/      スループットと往復の遅延(libzmq の local_thr / loc
 - iOS(NIOTransportServices)— 後で(上の 2026-10-18 の決定)。Linux の確認も後で
 - ドキュメントと、zguide の例をいくつか移したもの。DocC の道具は Command Line Tools に無いので、まず英語の手引き `docs/GUIDE.md` にし、
   載せるコードは例のパッケージ(`Examples/`)でビルドして動かしたものにする。DocC は Xcode を入れたときに
-- 版 0.1.0
+- 版 0.1.0 — 準備済み(2026-10-18):`CHANGELOG.md`、例(`Examples/`)、英語の手引き(`docs/GUIDE.md`)、待ち時間の上限などの足し算(DESIGN 8 章)。
+  タグと GitHub のリリースはユーザーの了承のあとで
+  - 版を切る前の確認(2026-10-18):単体テスト 97 本と InteropTests 30 本。InteropTests は 1 回目に 2 本落ち(そのうち 1 本は
+    `libzmqCurveClientWithAnotherKeyIsRefusedBySwiftServer`)、単独と 2 回目では全部通った。記録を残しておらず原因は未確認(時間に頼る試験の揺れと見ている)
 
 ### あとでやるかもしれないもの
 

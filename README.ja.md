@@ -9,10 +9,10 @@ English: [README.md](README.md)
 > CURVE の暗号(Salsa20・XSalsa20・Poly1305)は Swift で書き、libsodium と libzmq で確かめた。X25519 は CryptoKit(Linux は swift-crypto)。
 > 外部の専門家による監査は受けていない。
 
-入れ方(まだ版のタグは無い):
+入れ方(いまの版は 0.1.0。変更の記録は [CHANGELOG.md](CHANGELOG.md)。1.0 までは小さい版でも API が変わることがある):
 
 ```swift
-.package(url: "https://github.com/daitomanabe/swift-zmtp.git", branch: "main")
+.package(url: "https://github.com/daitomanabe/swift-zmtp.git", from: "0.1.0")
 ```
 
 ```swift

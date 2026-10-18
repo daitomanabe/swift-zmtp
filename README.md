@@ -22,10 +22,10 @@ Swift 6. macOS 15 or iOS 18, or Linux.
 
 ## Installation
 
-There is no tagged release yet.
+The current release is 0.1.0 ([CHANGELOG](CHANGELOG.md)). Before 1.0, minor versions may change the API.
 
 ```swift
-.package(url: "https://github.com/daitomanabe/swift-zmtp.git", branch: "main")
+.package(url: "https://github.com/daitomanabe/swift-zmtp.git", from: "0.1.0")
 ```
 
 ```swift
